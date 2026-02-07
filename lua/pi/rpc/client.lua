@@ -119,6 +119,9 @@ function M:_handle_line(line)
     return
   end
 
+  -- Debug: log all messages (can be removed later)
+  -- vim.notify("Pi RPC: " .. vim.inspect(message):sub(1, 100), vim.log.levels.DEBUG)
+
   if message.type == "response" and message.id then
     local callback = self.pending[message.id]
     if callback then
@@ -129,7 +132,8 @@ function M:_handle_line(line)
         callback({ error = message.error or "Unknown error" })
       end
     end
-  elseif message.type == "event" or message.type == "message_update" or message.type == "agent_start" or message.type == "agent_end" then
+  else
+    -- All non-response messages are events
     local events = require("pi.events")
     events.emit("rpc_event", message)
   end
