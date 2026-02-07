@@ -1,0 +1,123 @@
+*pi.txt*  Native Pi coding agent integration for Neovim
+
+===============================================================================
+CONTENTS                                                         *pi-contents*
+
+    1. Introduction ....................... |pi-introduction|
+    2. Installation ....................... |pi-installation|
+    3. Configuration ...................... |pi-configuration|
+    4. Commands ........................... |pi-commands|
+    5. API ................................ |pi-api|
+
+===============================================================================
+INTRODUCTION                                                 *pi-introduction*
+
+Pi.nvim provides a native Neovim interface for the Pi coding agent. It offers
+real-time visualization of agent operations, file change approval workflow,
+and session management.
+
+Features:
+  - Native RPC communication with Pi agent
+  - Real-time status and logging
+  - Side-by-side diff viewer
+  - File change approval system
+  - Session persistence
+  - Chat interface with agent
+
+===============================================================================
+INSTALLATION                                                 *pi-installation|
+
+Using lazy.nvim: >lua
+
+    {
+      "your-username/pi.nvim",
+      config = function()
+        require("pi").setup({
+          auto_connect = true,
+          approval_mode = true,
+        })
+      end
+    }
+<
+
+===============================================================================
+CONFIGURATION                                               *pi-configuration|
+
+Default configuration: >lua
+
+    require("pi").setup({
+      host = "127.0.0.1",
+      port = 43863,
+      auto_connect = false,
+      auto_open_panel = true,
+      auto_open_logs = false,
+      approval_mode = true,
+      
+      keymaps = {
+        toggle_panel = "<leader>pt",
+        toggle_logs = "<leader>pl",
+        approve = "<leader>pa",
+        reject = "<leader>pr",
+      }
+    })
+<
+
+===============================================================================
+COMMANDS                                                         *pi-commands|
+
+:PiConnect                                                       *:PiConnect*
+    Connect to Pi RPC server
+
+:PiDisconnect                                                 *:PiDisconnect*
+    Disconnect from Pi RPC server
+
+:PiStart {task}                                                   *:PiStart*
+    Start Pi agent with the given task description
+
+:PiPause                                                           *:PiPause*
+    Pause the running agent
+
+:PiResume                                                         *:PiResume*
+    Resume a paused agent
+
+:PiStop                                                             *:PiStop*
+    Stop the running agent
+
+:PiToggle                                                         *:PiToggle*
+    Toggle the control panel
+
+:PiLogs                                                             *:PiLogs*
+    Toggle the logs viewer
+
+:PiDiff [file]                                                      *:PiDiff*
+    Show diff for file (defaults to current file)
+
+:PiApprove                                                       *:PiApprove*
+    Approve the current pending change
+
+:PiReject                                                         *:PiReject*
+    Reject the current pending change
+
+:PiSessionList                                               *:PiSessionList*
+    List available sessions
+
+:PiSessionLoad {id}                                          *:PiSessionLoad*
+    Load a specific session
+
+:PiSessionSave [name]                                        *:PiSessionSave*
+    Save the current session
+
+===============================================================================
+API                                                                   *:pi-api|
+
+lua require("pi").setup({opts})                              *pi.setup()*
+    Initialize the plugin with configuration options
+
+lua require("pi").connect()                                  *pi.connect()*
+    Connect to Pi RPC server
+
+lua require("pi").start(task)                                *pi.start()*
+    Start agent with task description
+
+===============================================================================
+vim:tw=78:ts=8:ft=help:norl:
