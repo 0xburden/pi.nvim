@@ -159,6 +159,10 @@ local function register_tool_call_context(tool)
   if direct then
     entry.raw_path = direct
   end
+  local command = args.command
+  if command then
+    entry.command = command
+  end
   M.tool_call_context[id] = entry
 end
 
@@ -426,9 +430,11 @@ function M.handle_event(event)
 
   if event.type == "message_end" and event.message and event.message.role == "toolResult" then
     local tool_id = event.message.toolCallId
+    local context_command
     if tool_id then
       local context = M.tool_call_context[tool_id]
       if context then
+        context_command = context.command
         local resolved = context.filepath or context.raw_path
         if resolved then
           queue_file_path(resolved)
@@ -448,7 +454,7 @@ function M.handle_event(event)
     end
     local result_text = table.concat(tool_message_parts, "")
 
-    if tool_name == "bash" then
+    if tool_name == "bash" and context_command and context_command:match("pwd") then
       local cwd_guess = vim.trim(result_text)
       if cwd_guess ~= "" then
         M.agent_cwd = cwd_guess
