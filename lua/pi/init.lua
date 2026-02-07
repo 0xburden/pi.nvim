@@ -89,9 +89,6 @@ function M.spawn(callback)
 
   -- Spawn pi with RPC flag, redirecting output to /dev/null to avoid TUI pollution
   local handle, pid
-  local stdin = uv.new_pipe(false)
-  local stdout = uv.new_pipe(false)
-  local stderr = uv.new_pipe(false)
 
   -- Open /dev/null for redirection
   local devnull, err = uv.fs_open("/dev/null", "w", 438)
@@ -105,7 +102,7 @@ function M.spawn(callback)
 
   handle, pid = uv.spawn("pi", {
     args = { "--rpc", "--rpc-port", tostring(port) },
-    stdio = { stdin, devnull, devnull },
+    stdio = { nil, devnull, devnull },
     detached = true,
   }, function(code, signal)
     -- Process exited
