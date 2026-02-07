@@ -31,6 +31,107 @@ M.edited_files = {}
 M.RESULT_BUF_NAME = "PiChat"
 M.INPUT_BUF_NAME = "PiChatInput"
 
+local function normalize_path(path)
+  if not path or path == "" then
+    return nil
+  end
+  return vim.fn.fnamemodify(path, ":p")
+end
+
+local function extract_path_from_text(text)
+  if not text then
+    return nil
+  end
+  for line in text:gmatch("[^
+\r]+") do
+    local candidate = line:match("Filepath:%s*(.+)")
+      or line:match("filepath:%s*(.+)")
+      or line:match("File:%s*(.+)")
+      or line:match("file:%s*(.+)")
+    if candidate then
+      return normalize_path(candidate)
+    end
+  end
+  return nil
+end
+
+local function extract_path_from_tool(tool)
+  if not tool then
+    return nil
+  end
+  local args = tool.arguments or tool.args or {}
+  local direct = args.file or args.path or args.filepath
+  if direct then
+    return normalize_path(direct)
+  end
+  return nil
+end
+
+local function detect_file_paths(event)
+  local paths = {}
+  local function push(path)
+    local normalized = normalize_path(path)
+    if normalized then
+      paths[normalized] = true
+    end
+  end
+
+  if event.tool then
+    local path = extract_path_from_tool(event.tool)
+    if path then push(path) end
+  end
+  if event.toolCall then
+    local path = extract_path_from_tool(event.toolCall)
+    if path then push(path) end
+  end
+  if event.tool_name and event.arguments then
+    local path = extract_path_from_tool({arguments = event.arguments})
+    if path then push(path) end
+  end
+  if event.assistantMessageEvent then
+    local tool = event.assistantMessageEvent.toolCall or event.assistantMessageEvent.tool
+    if tool then
+      local path = extract_path_from_tool(tool)
+      if path then push(path) end
+    end
+    local delta = event.assistantMessageEvent.delta
+    local text_path = extract_path_from_text(delta)
+    if text_path then push(text_path) end
+  end
+  if event.result then
+    local text_path = extract_path_from_text(event.result)
+    if text_path then push(text_path) end
+  end
+  if event.output then
+    local text_path = extract_path_from_text(event.output)
+    if text_path then push(text_path) end
+  end
+  if event.content and type(event.content) == "string" then
+    local text_path = extract_path_from_text(event.content)
+    if text_path then push(text_path) end
+  end
+
+  local unique = {}
+  for path in pairs(paths) do
+    table.insert(unique, path)
+  end
+  return unique
+end
+
+local function try_open_file(path)
+  if not path then
+    return
+  end
+  if M.edited_files[path] then
+    return
+  end
+  if vim.fn.filereadable(path) == 0 then
+    vim.notify("Pi: File not readable: " .. path, vim.log.levels.WARN)
+    return
+  end
+  M.edited_files[path] = true
+  M.open_file_in_other_window(path)
+end
 -- Get or create buffer
 local function get_or_create_buf(name, scratch)
   local existing = vim.fn.bufnr(name)
@@ -160,9 +261,6 @@ end
 function M.handle_event(event)
   local event_type = event.type
 
-  -- Debug: print event type
-  print(string.format("[Pi] Event: %s", event_type))
-
   if event_type == "agent_start" then
     M.is_streaming = true
     M.current_response = ""
@@ -257,6 +355,11 @@ function M.handle_event(event)
     M.is_streaming = false
     M.add_message("system", "Error: " .. (event.error or "Unknown error"), false)
   end
+
+  local paths = detect_file_paths(event)
+  for _, path in ipairs(paths) do
+    try_open_file(path)
+  end
   
   -- Always re-render after handling an event
   M.render()
@@ -264,10 +367,8 @@ end
 
 function M.open_file_in_other_window(filepath)
   filepath = vim.fn.expand(filepath)
-  print(string.format("[Pi] open_file_in_other_window: %s", filepath))
 
   if vim.fn.filereadable(filepath) == 0 then
-    print(string.format("[Pi] File not readable: %s", filepath))
     return
   end
 
@@ -283,7 +384,6 @@ function M.open_file_in_other_window(filepath)
   end
 
   -- Open the file
-  print(string.format("[Pi] Opening in window: %d", current_win))
   vim.api.nvim_set_current_win(current_win)
   vim.cmd("edit " .. vim.fn.fnameescape(filepath))
 
@@ -340,7 +440,7 @@ function M.add_tool_call(tool)
   local args = tool.arguments or tool.args or {}
   local filepath = args.file or args.path
 
-  print(string.format("[Pi] Tool call: %s, filepath: %s", tool_name, filepath or "nil"))
+
 
   local display_text
   if filepath then
@@ -353,13 +453,7 @@ function M.add_tool_call(tool)
 
   -- Open file immediately when tool is called (for edit/write tools)
   if filepath and (tool_name == "edit" or tool_name == "write") then
-    if not M.edited_files[filepath] then
-      M.edited_files[filepath] = true
-      print(string.format("[Pi] Opening file: %s", filepath))
-      vim.defer_fn(function()
-        M.open_file_in_other_window(filepath)
-      end, 100)
-    end
+    try_open_file(filepath)
   end
 end
 
