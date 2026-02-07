@@ -17,6 +17,12 @@ M.current_response = ""
 M.is_streaming = false
 M.messages = {}
 
+-- Session info
+M.session_info = {
+  model = nil,
+  tokens = { input = 0, output = 0 },
+}
+
 -- Constants
 M.RESULT_BUF_NAME = "PiChat"
 M.INPUT_BUF_NAME = "PiChatInput"
@@ -182,6 +188,11 @@ function M.handle_event(event)
         M.add_tool_call(delta.toolCall)
       end
     end
+    -- Capture usage info if available
+    if event.usage then
+      M.session_info.tokens.input = event.usage.prompt_tokens or M.session_info.tokens.input
+      M.session_info.tokens.output = event.usage.completion_tokens or M.session_info.tokens.output
+    end
 
   elseif event.type == "error" then
     M.is_streaming = false
@@ -237,6 +248,25 @@ function M.render()
   end
 
   local lines = {}
+
+  -- Header with model and token info
+  local header_parts = {}
+  if M.session_info.model then
+    table.insert(header_parts, "Model: " .. M.session_info.model)
+  end
+  if M.session_info.tokens.input > 0 or M.session_info.tokens.output > 0 then
+    local tokens = string.format("Tokens: %d/%d", M.session_info.tokens.input, M.session_info.tokens.output)
+    table.insert(header_parts, tokens)
+  end
+  if M.is_streaming then
+    table.insert(header_parts, "● Working...")
+  end
+
+  if #header_parts > 0 then
+    table.insert(lines, "  " .. table.concat(header_parts, "  |  "))
+    table.insert(lines, string.rep("═", 42))
+    table.insert(lines, "")
+  end
 
   for _, msg in ipairs(M.messages) do
     local header
@@ -306,46 +336,59 @@ function M.send_message(text)
   end)
 end
 
--- Load conversation history
+-- Load conversation history and session info
 function M.load_history()
   local client = state.get("rpc_client")
   if not client then
     return
   end
 
-  client:request("get_messages", { type = "get_messages" }, function(result)
+  -- Get session state for model info
+  client:request("get_state", { type = "get_state" }, function(state_result)
     vim.schedule(function()
-      if result.error then
-        return
+      if state_result.success and state_result.data then
+        local data = state_result.data
+        if data.model then
+          M.session_info.model = data.model.name or data.model.id or "Unknown"
+        end
       end
 
-      local messages = result.data and result.data.messages or {}
-      M.messages = {}
+      -- Now get messages
+      client:request("get_messages", { type = "get_messages" }, function(result)
+        vim.schedule(function()
+          if result.error then
+            return
+          end
 
-      for _, msg in ipairs(messages) do
-        local role = msg.role
-        local content = ""
+          local messages = result.data and result.data.messages or {}
+          M.messages = {}
 
-        if type(msg.content) == "string" then
-          content = msg.content
-        elseif type(msg.content) == "table" then
-          for _, block in ipairs(msg.content) do
-            if block.type == "text" and block.text then
-              content = content .. block.text
+          for _, msg in ipairs(messages) do
+            local role = msg.role
+            local content = ""
+
+            if type(msg.content) == "string" then
+              content = msg.content
+            elseif type(msg.content) == "table" then
+              for _, block in ipairs(msg.content) do
+                if block.type == "text" and block.text then
+                  content = content .. block.text
+                end
+              end
+            end
+
+            if role and content then
+              table.insert(M.messages, {
+                role = role,
+                content = content,
+                streaming = false,
+              })
             end
           end
-        end
 
-        if role and content then
-          table.insert(M.messages, {
-            role = role,
-            content = content,
-            streaming = false,
-          })
-        end
-      end
-
-      M.render()
+          M.render()
+        end)
+      end)
     end)
   end)
 end
