@@ -81,8 +81,7 @@ function M.open()
   vim.api.nvim_win_set_option(M.result_win, "signcolumn", "no")
   vim.api.nvim_win_set_option(M.result_win, "foldcolumn", "0")
   vim.api.nvim_win_set_option(M.result_win, "colorcolumn", "")
-  vim.api.nvim_win_set_option(M.result_win, "winhighlight",
-    "Normal:PiChatNormal,EndOfBuffer:PiChatNormal")
+
 
   vim.cmd("belowright 3split")
   M.input_win = vim.api.nvim_get_current_win()
@@ -93,8 +92,6 @@ function M.open()
   vim.api.nvim_win_set_option(M.input_win, "signcolumn", "no")
   vim.api.nvim_win_set_option(M.input_win, "foldcolumn", "0")
   vim.api.nvim_win_set_option(M.input_win, "colorcolumn", "")
-  vim.api.nvim_win_set_option(M.input_win, "winhighlight",
-    "Normal:PiChatInput,EndOfBuffer:PiChatInput")
 
   M.setup_input_buffer()
   M.subscribe_to_events()
@@ -162,7 +159,10 @@ end
 -- Handle ALL event types from Pi
 function M.handle_event(event)
   local event_type = event.type
-  
+
+  -- Debug: print event type
+  print(string.format("[Pi] Event: %s", event_type))
+
   if event_type == "agent_start" then
     M.is_streaming = true
     M.current_response = ""
@@ -263,58 +263,31 @@ function M.handle_event(event)
 end
 
 function M.open_file_in_other_window(filepath)
-  -- Expand ~ to home directory
   filepath = vim.fn.expand(filepath)
+  print(string.format("[Pi] open_file_in_other_window: %s", filepath))
 
   if vim.fn.filereadable(filepath) == 0 then
-    vim.notify("File not found: " .. filepath, vim.log.levels.WARN)
+    print(string.format("[Pi] File not readable: %s", filepath))
     return
   end
 
-  -- Show status
-  vim.notify("Opening: " .. vim.fn.fnamemodify(filepath, ":~:."), vim.log.levels.INFO)
+  -- Focus the leftmost code window
+  vim.cmd("normal! \\<C-w>h")
 
+  -- Check if this is a chat window
   local current_win = vim.api.nvim_get_current_win()
-
-  -- Check if file is already open in a non-chat window
-  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if win ~= M.result_win and win ~= M.input_win then
-      local buf = vim.api.nvim_win_get_buf(win)
-      local buf_name = vim.api.nvim_buf_get_name(buf)
-      if buf_name == vim.fn.fnamemodify(filepath, ":p") then
-        -- File already open, just focus it briefly then return
-        vim.api.nvim_set_current_win(win)
-        vim.api.nvim_set_current_win(current_win)
-        return
-      end
-    end
-  end
-
-  -- Find or create target window
-  local target_win = nil
-  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if win ~= M.result_win and win ~= M.input_win then
-      target_win = win
-      break
-    end
-  end
-
-  if not target_win then
-    -- Create a new split to the left
-    vim.cmd("topleft vsplit")
-    target_win = vim.api.nvim_get_current_win()
+  if current_win == M.result_win or current_win == M.input_win then
+    vim.cmd("normal! \\<C-w>l")
+    vim.cmd("normal! \\<C-w>h")
+    current_win = vim.api.nvim_get_current_win()
   end
 
   -- Open the file
-  vim.api.nvim_set_current_win(target_win)
-  local ok, err = pcall(vim.cmd, "edit " .. vim.fn.fnameescape(filepath))
-  if not ok then
-    vim.notify("Failed to open file: " .. tostring(err), vim.log.levels.ERROR)
-    vim.api.nvim_set_current_win(current_win)
-    return
-  end
+  print(string.format("[Pi] Opening in window: %d", current_win))
+  vim.api.nvim_set_current_win(current_win)
+  vim.cmd("edit " .. vim.fn.fnameescape(filepath))
 
-  -- Return to chat input
+  -- Return to chat
   vim.defer_fn(function()
     if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
       vim.api.nvim_set_current_win(M.input_win)
@@ -367,6 +340,8 @@ function M.add_tool_call(tool)
   local args = tool.arguments or tool.args or {}
   local filepath = args.file or args.path
 
+  print(string.format("[Pi] Tool call: %s, filepath: %s", tool_name, filepath or "nil"))
+
   local display_text
   if filepath then
     display_text = string.format("🔧 %s: %s", tool_name, filepath)
@@ -380,6 +355,7 @@ function M.add_tool_call(tool)
   if filepath and (tool_name == "edit" or tool_name == "write") then
     if not M.edited_files[filepath] then
       M.edited_files[filepath] = true
+      print(string.format("[Pi] Opening file: %s", filepath))
       vim.defer_fn(function()
         M.open_file_in_other_window(filepath)
       end, 100)

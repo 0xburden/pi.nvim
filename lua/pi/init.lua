@@ -7,11 +7,6 @@ M.config = require("pi.config")
 function M.setup(opts)
   M.config.setup(opts or {})
 
-  -- Set up highlight groups using colorscheme colors
-  -- Use linked highlights that adapt to colorscheme
-  vim.api.nvim_set_hl(0, "PiChatNormal", { link = "NormalFloat" })
-  vim.api.nvim_set_hl(0, "PiChatInput", { link = "Pmenu" })
-
   local Client = require("pi.rpc.client")
   local client = Client.new({
     host = M.config.get("host"),
