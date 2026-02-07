@@ -4,24 +4,188 @@ M.state = require("pi.state")
 M.events = require("pi.events")
 M.config = require("pi.config")
 
+-- Process handle for spawned Pi
+M.pi_process = nil
+
 -- Initialize plugin
 function M.setup(opts)
   -- Merge user config
   M.config.setup(opts or {})
-  
+
   -- Create RPC client
   local Client = require("pi.rpc.client")
   local client = Client.new({
     host = M.config.get("host"),
     port = M.config.get("port"),
   })
-  
+
   M.state.update("rpc_client", client)
-  
+
   -- Auto-connect if configured
   if M.config.get("auto_connect") then
     M.connect()
   end
+end
+
+-- Check if Pi RPC is already running by attempting connection
+function M.is_running(callback)
+  local client = M.state.get("rpc_client")
+  if not client then
+    callback(false)
+    return
+  end
+
+  -- Try to connect with short timeout
+  local timer = vim.loop.new_timer()
+  local connected = false
+
+  client:connect(function(success, err)
+    connected = success
+    if success then
+      -- Disconnect immediately, we were just checking
+      client:disconnect()
+    end
+    if timer then
+      timer:stop()
+      timer:close()
+    end
+    callback(success)
+  end)
+
+  -- Timeout after 500ms
+  timer:start(500, 0, vim.schedule_wrap(function()
+    if not connected then
+      client:disconnect()
+      timer:close()
+      callback(false)
+    end
+  end))
+end
+
+-- Spawn Pi with RPC enabled
+function M.spawn(callback)
+  if M.pi_process then
+    vim.notify("Pi: Process already spawned", vim.log.levels.WARN)
+    if callback then callback(true) end
+    return
+  end
+
+  local uv = vim.loop
+  local port = M.config.get("port") or 43863
+
+  vim.notify("Pi: Starting RPC server on port " .. port .. "...", vim.log.levels.INFO)
+
+  -- Spawn pi with RPC flag
+  local handle, pid
+  local stdout = uv.new_pipe(false)
+  local stderr = uv.new_pipe(false)
+
+  handle, pid = uv.spawn("pi", {
+    args = { "--rpc", "--rpc-port", tostring(port) },
+    stdio = { nil, stdout, stderr },
+    detached = true,
+  }, function(code, signal)
+    -- Process exited
+    vim.schedule(function()
+      if code ~= 0 then
+        vim.notify("Pi: Process exited with code " .. code, vim.log.levels.WARN)
+      end
+    end)
+    M.pi_process = nil
+    if handle then
+      handle:close()
+    end
+  end)
+
+  if not handle then
+    vim.notify("Pi: Failed to spawn process. Is 'pi' in your PATH?", vim.log.levels.ERROR)
+    if callback then callback(false) end
+    return
+  end
+
+  M.pi_process = { handle = handle, pid = pid }
+
+  -- Read stdout/stderr for debugging
+  local function on_read(stream, name)
+    return function(err, data)
+      if err then
+        return
+      end
+      if data then
+        vim.schedule(function()
+          -- Optional: log to a debug buffer or file
+          -- vim.notify("Pi " .. name .. ": " .. data:sub(1, 100), vim.log.levels.DEBUG)
+        end)
+      end
+    end
+  end
+
+  stdout:read_start(on_read(stdout, "stdout"))
+  stderr:read_start(on_read(stderr, "stderr"))
+
+  -- Wait a moment for the server to start, then callback
+  vim.defer_fn(function()
+    vim.notify("Pi: RPC server started (PID: " .. pid .. ")", vim.log.levels.INFO)
+    if callback then callback(true) end
+  end, 1000)
+end
+
+-- Stop the spawned Pi process
+function M.stop_process()
+  if not M.pi_process then
+    vim.notify("Pi: No spawned process to stop", vim.log.levels.WARN)
+    return
+  end
+
+  -- Kill the process
+  local uv = vim.loop
+  uv.kill(M.pi_process.pid, "sigterm")
+
+  if M.pi_process.handle then
+    M.pi_process.handle:close()
+  end
+
+  M.pi_process = nil
+  vim.notify("Pi: Process stopped", vim.log.levels.INFO)
+end
+
+-- Ensure Pi is running and connected (auto-spawn if needed)
+-- @param opts table: { auto_spawn = true, spawn_callback = function }
+function M.ensure_connected(opts, callback)
+  opts = opts or { auto_spawn = true }
+
+  -- Already connected?
+  if M.state.get("connected") then
+    if callback then callback(true) end
+    return
+  end
+
+  -- Check if Pi is running elsewhere
+  M.is_running(function(running)
+    if running then
+      -- Pi is running, just connect
+      M.connect(function(success)
+        if callback then callback(success) end
+      end)
+    elseif opts.auto_spawn then
+      -- Need to spawn Pi
+      M.spawn(function(spawned)
+        if spawned then
+          -- Wait a bit for server to be ready
+          vim.defer_fn(function()
+            M.connect(function(success)
+              if callback then callback(success) end
+            end)
+          end, 1500)
+        else
+          if callback then callback(false) end
+        end
+      end)
+    else
+      vim.notify("Pi: Not running and auto-spawn disabled", vim.log.levels.ERROR)
+      if callback then callback(false) end
+    end
+  end)
 end
 
 -- Connect to Pi agent
@@ -67,27 +231,32 @@ function M.disconnect()
   end
 end
 
--- Start agent with task
-function M.start(task)
-  if not M.state.get("connected") then
-    vim.notify("Pi: Not connected to agent", vim.log.levels.ERROR)
-    return
-  end
-  
-  local client = M.state.get("rpc_client")
-  local agent = require("pi.rpc.agent")
-  
-  agent.start(client, task, function(result)
-    if result.error then
-      vim.notify("Pi: Failed to start - " .. result.error, vim.log.levels.ERROR)
-    else
-      vim.notify("Pi: Agent started", vim.log.levels.INFO)
-      
-      -- Auto-open logs if configured
-      if M.config.get("auto_open_logs") then
-        require("pi.ui.logs_viewer").open()
-      end
+-- Start agent with task (auto-spawns Pi if needed)
+function M.start(task, opts)
+  opts = opts or {}
+
+  -- Ensure we're connected (auto-spawn if needed)
+  M.ensure_connected({ auto_spawn = opts.auto_spawn ~= false }, function(connected)
+    if not connected then
+      vim.notify("Pi: Failed to connect to agent", vim.log.levels.ERROR)
+      return
     end
+
+    local client = M.state.get("rpc_client")
+    local agent = require("pi.rpc.agent")
+
+    agent.start(client, task, function(result)
+      if result.error then
+        vim.notify("Pi: Failed to start - " .. result.error, vim.log.levels.ERROR)
+      else
+        vim.notify("Pi: Agent started", vim.log.levels.INFO)
+
+        -- Auto-open logs if configured
+        if M.config.get("auto_open_logs") then
+          require("pi.ui.logs_viewer").open()
+        end
+      end
+    end)
   end)
 end
 
