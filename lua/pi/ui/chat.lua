@@ -6,6 +6,8 @@ local M = {}
 local HIGHLIGHT_NS = vim.api.nvim_create_namespace("pi_chat_highlights")
 local THINKING_HL = "PiChatThinking"
 local USER_PROMPT_HL = "PiChatUserPrompt"
+local DIFF_ADD_HL = "PiChatDiffAdd"
+local DIFF_DEL_HL = "PiChatDiffDel"
 
 local function safe_get_highlight(name)
   local ok, hl = pcall(vim.api.nvim_get_hl_by_name, name, true)
@@ -41,6 +43,20 @@ local function setup_highlights()
     user_opts.bg = 0x1f1f1f
   end
   vim.api.nvim_set_hl(0, USER_PROMPT_HL, user_opts)
+
+  local diff_add_hl = safe_get_highlight("DiffAdd")
+  local diff_del_hl = safe_get_highlight("DiffDelete")
+  local function copy_highlight(src, name)
+    local opts = {}
+    if src.foreground then opts.fg = src.foreground end
+    if src.background then opts.bg = src.background end
+    if src.reverse then opts.reverse = src.reverse end
+    if src.italic then opts.italic = src.italic end
+    if src.bold then opts.bold = src.bold end
+    vim.api.nvim_set_hl(0, name, opts)
+  end
+  copy_highlight(diff_add_hl, DIFF_ADD_HL)
+  copy_highlight(diff_del_hl, DIFF_DEL_HL)
 end
 
 setup_highlights()
@@ -387,11 +403,15 @@ function M.open_file_in_other_window(filepath)
 end
 
 function M.add_message(role, content, is_streaming)
-  table.insert(M.messages, {
+  local entry = {
     role = role,
     content = content,
     streaming = is_streaming,
-  })
+  }
+  if role == "assistant" then
+    entry.thinking = ""
+  end
+  table.insert(M.messages, entry)
   M.render()
 end
 
@@ -402,9 +422,10 @@ function M.append_to_stream(text)
     if M.messages[i].role == "assistant" and M.messages[i].streaming then
       local full_content = M.current_response
       if M.current_thinking ~= "" then
-        full_content = "💭 " .. M.current_thinking .. "\n\n" .. M.current_response
+        full_content = M.current_thinking .. "\n\n" .. M.current_response
       end
       M.messages[i].content = full_content
+      M.messages[i].thinking = M.current_thinking
       break
     end
   end
@@ -417,9 +438,10 @@ function M.append_to_thinking(text)
     if M.messages[i].role == "assistant" and M.messages[i].streaming then
       local full_content = M.current_response
       if M.current_thinking ~= "" then
-        full_content = "💭 " .. M.current_thinking .. "\n\n" .. M.current_response
+        full_content = M.current_thinking .. "\n\n" .. M.current_response
       end
       M.messages[i].content = full_content
+      M.messages[i].thinking = M.current_thinking
       break
     end
   end
@@ -474,10 +496,35 @@ function M.render()
     end
     table.insert(lines, "")
   end
-  local function add_message_lines(content, hl)
-    for _, line in ipairs(vim.split(content or "", "\n")) do
-      add_line("  " .. line, hl)
+  local function split_text(text)
+    text = text or ""
+    return vim.split(text, "\n", { plain = true })
+  end
+  local function thinking_line_count(text)
+    local parts = split_text(text)
+    while #parts > 0 and parts[#parts] == "" do
+      table.remove(parts)
     end
+    return #parts
+  end
+  local function add_message_lines(content, hl, line_highlighter)
+    for _, line in ipairs(split_text(content)) do
+      local applied = hl
+      if line_highlighter then
+        applied = line_highlighter(line) or applied
+      end
+      add_line("  " .. line, applied)
+    end
+  end
+
+  local function diff_line_highlight(line)
+    if line:match("^%s*%+") then
+      return DIFF_ADD_HL
+    end
+    if line:match("^%s*-") then
+      return DIFF_DEL_HL
+    end
+    return nil
   end
 
   local width = math.max(40, (M.result_win and vim.api.nvim_win_is_valid(M.result_win)) and vim.api.nvim_win_get_width(M.result_win) - 4 or 40)
@@ -508,23 +555,18 @@ function M.render()
       add_message_lines(msg.content, USER_PROMPT_HL)
 
     elseif msg.role == "assistant" then
-      local thinking_block = false
-      for _, raw in ipairs(vim.split(msg.content or "", "\n")) do
-        local text_line = raw or ""
-        local is_thinking_line = text_line:match("^%s*💭")
-        if is_thinking_line then
-          thinking_block = true
-        elseif thinking_block and text_line:match("^%s*$") then
-          thinking_block = false
-        end
-        add_line("  " .. text_line, (is_thinking_line or (thinking_block and not text_line:match("^%s*$"))) and THINKING_HL or nil)
+      local content_lines = split_text(msg.content)
+      local highlight_count = thinking_line_count(msg.thinking)
+      for idx, line in ipairs(content_lines) do
+        local line_hl = (highlight_count > 0 and idx <= highlight_count) and THINKING_HL or nil
+        add_line("  " .. line, line_hl)
       end
 
     elseif msg.role == "tool" then
       add_message_lines(msg.content)
 
     elseif msg.role == "tool_result" then
-      add_message_lines(msg.content)
+      add_message_lines(msg.content, nil, diff_line_highlight)
 
     elseif msg.role == "system" then
       add_line("  ⚠️  " .. msg.content)
@@ -599,6 +641,7 @@ function M.load_history()
           for _, msg in ipairs(messages) do
             local role = msg.role
             local content = ""
+            local thinking_text = ""
 
             if type(msg.content) == "string" then
               content = msg.content
@@ -607,13 +650,18 @@ function M.load_history()
                 if block.type == "text" and block.text then
                   content = content .. block.text
                 elseif block.type == "thinking" and block.thinking then
-                  content = content .. "💭 " .. block.thinking .. "\n\n"
+                  thinking_text = thinking_text .. block.thinking
+                  content = content .. block.thinking .. "\n\n"
                 end
               end
             end
 
             if role then
-              table.insert(M.messages, { role = role, content = content, streaming = false })
+              local entry = { role = role, content = content, streaming = false }
+              if role == "assistant" then
+                entry.thinking = thinking_text
+              end
+              table.insert(M.messages, entry)
             end
           end
 
