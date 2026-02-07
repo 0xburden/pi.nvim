@@ -14,6 +14,7 @@ M.event_unsub = nil
 
 -- Streaming state
 M.current_response = ""
+M.current_thinking = ""
 M.is_streaming = false
 M.messages = {}
 
@@ -32,22 +33,18 @@ M.INPUT_BUF_NAME = "PiChatInput"
 
 -- Get or create buffer
 local function get_or_create_buf(name, scratch)
-  -- Check if buffer already exists
   local existing = vim.fn.bufnr(name)
   if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) then
     return existing
   end
   
-  -- Create new buffer
   local buf = vim.api.nvim_create_buf(false, scratch or false)
   vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
   vim.api.nvim_buf_set_option(buf, "bufhidden", "hide")
   vim.api.nvim_buf_set_option(buf, "swapfile", false)
   
-  -- Set name with pcall to handle race conditions
-  local ok, err = pcall(vim.api.nvim_buf_set_name, buf, name)
+  local ok = pcall(vim.api.nvim_buf_set_name, buf, name)
   if not ok then
-    -- Name might exist from a recently closed buffer, try to find it
     existing = vim.fn.bufnr(name)
     if existing ~= -1 then
       vim.api.nvim_buf_delete(existing, { force = true })
@@ -64,20 +61,16 @@ function M.open()
     return
   end
 
-  -- Create result buffer (main chat display)
   M.result_buf = get_or_create_buf(M.RESULT_BUF_NAME, true)
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
   vim.api.nvim_buf_set_option(M.result_buf, "wrap", true)
   vim.api.nvim_buf_set_option(M.result_buf, "linebreak", true)
 
-  -- Create input buffer
   M.input_buf = get_or_create_buf(M.INPUT_BUF_NAME, true)
 
-  -- Calculate width (40% of screen or minimum 50 columns)
   local total_width = vim.o.columns
   local chat_width = math.max(50, math.floor(total_width * 0.4))
 
-  -- Create main result window (right side, wider)
   vim.cmd("botright " .. chat_width .. "vsplit")
   M.result_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(M.result_win, M.result_buf)
@@ -88,11 +81,9 @@ function M.open()
   vim.api.nvim_win_set_option(M.result_win, "signcolumn", "no")
   vim.api.nvim_win_set_option(M.result_win, "foldcolumn", "0")
   vim.api.nvim_win_set_option(M.result_win, "colorcolumn", "")
-  -- Set subtle background color for contrast
   vim.api.nvim_win_set_option(M.result_win, "winhighlight",
     "Normal:PiChatNormal,EndOfBuffer:PiChatNormal")
 
-  -- Create input window below (3 lines tall)
   vim.cmd("belowright 3split")
   M.input_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(M.input_win, M.input_buf)
@@ -102,58 +93,33 @@ function M.open()
   vim.api.nvim_win_set_option(M.input_win, "signcolumn", "no")
   vim.api.nvim_win_set_option(M.input_win, "foldcolumn", "0")
   vim.api.nvim_win_set_option(M.input_win, "colorcolumn", "")
-  -- Slightly different background for input area
   vim.api.nvim_win_set_option(M.input_win, "winhighlight",
     "Normal:PiChatInput,EndOfBuffer:PiChatInput")
 
-  -- Set up input buffer
   M.setup_input_buffer()
-
-  -- Subscribe to events
   M.subscribe_to_events()
-
-  -- Load existing history
   M.load_history()
 
-  -- Focus input
   vim.api.nvim_set_current_win(M.input_win)
   vim.cmd("startinsert!")
 
   state.update("ui.chat_open", true)
 end
 
--- Set up input buffer keymaps and behavior
 function M.setup_input_buffer()
-  -- Submit on Enter in normal mode
   vim.api.nvim_buf_set_keymap(M.input_buf, "n", "<CR>", "", {
-    noremap = true,
-    silent = true,
-    callback = function()
-      M.submit()
-    end,
+    noremap = true, silent = true, callback = function() M.submit() end,
   })
-
-  -- Submit on Enter in insert mode
   vim.api.nvim_buf_set_keymap(M.input_buf, "i", "<CR>", "", {
-    noremap = true,
-    silent = true,
-    callback = function()
-      M.submit()
-    end,
+    noremap = true, silent = true, callback = function() M.submit() end,
   })
-
-  -- Close on q
   vim.api.nvim_buf_set_keymap(M.input_buf, "n", "q", "<cmd>PiChat<CR>", { noremap = true, silent = true })
   vim.api.nvim_buf_set_keymap(M.result_buf, "n", "q", "<cmd>PiChat<CR>", { noremap = true, silent = true })
-
-  -- New line with Shift+Enter
   vim.api.nvim_buf_set_keymap(M.input_buf, "i", "<S-CR>", "<CR>", { noremap = true, silent = true })
 
-  -- Set up buffer content
   vim.api.nvim_buf_set_lines(M.input_buf, 0, -1, false, { "Type your message..." })
   vim.api.nvim_buf_set_option(M.input_buf, "modifiable", true)
 
-  -- Clear placeholder on first enter
   vim.api.nvim_create_autocmd("InsertEnter", {
     buffer = M.input_buf,
     once = true,
@@ -166,7 +132,6 @@ function M.setup_input_buffer()
   })
 end
 
--- Submit message from input buffer
 function M.submit()
   if not M.input_buf or not vim.api.nvim_buf_is_valid(M.input_buf) then
     return
@@ -175,142 +140,168 @@ function M.submit()
   local lines = vim.api.nvim_buf_get_lines(M.input_buf, 0, -1, false)
   local text = table.concat(lines, "\n")
 
-  -- Skip if placeholder or empty
   if text == "Type your message..." or text:match("^%s*$") then
     return
   end
 
-  -- Send the message
   M.send_message(text)
-
-  -- Clear input
   vim.api.nvim_buf_set_lines(M.input_buf, 0, -1, false, { "" })
 end
 
--- Subscribe to RPC events
 function M.subscribe_to_events()
   if M.event_unsub then
     M.event_unsub()
   end
 
   M.event_unsub = events.on("rpc_event", function(event)
-    if not event then
-      return
-    end
-    M.handle_event(event)
+    if not event then return end
+    vim.schedule(function() M.handle_event(event) end)
   end)
 end
 
--- Handle incoming events
+-- Handle ALL event types from Pi
 function M.handle_event(event)
-  if event.type == "agent_start" then
+  local event_type = event.type
+  
+  if event_type == "agent_start" then
     M.is_streaming = true
     M.current_response = ""
+    M.current_thinking = ""
     M.add_message("assistant", "", true)
 
-  elseif event.type == "agent_end" then
+  elseif event_type == "agent_end" then
     M.is_streaming = false
-    -- Finalize the message
-    if M.current_response ~= "" then
-      M.finalize_streaming_message()
-    end
+    M.finalize_streaming_message()
     M.current_response = ""
+    M.current_thinking = ""
 
-  elseif event.type == "message_update" then
+  elseif event_type == "message_update" then
     local delta = event.assistantMessageEvent
-    if delta then
-      if delta.type == "text_delta" and delta.delta then
-        M.append_to_stream(delta.delta)
-      elseif delta.type == "tool_call" or delta.type == "tool_use" then
-        M.add_tool_call(delta.toolCall or delta.tool)
-      end
+    if not delta then return end
+    
+    local delta_type = delta.type
+    
+    if delta_type == "text_delta" and delta.delta then
+      M.append_to_stream(delta.delta)
+      
+    elseif delta_type == "thinking_delta" and delta.delta then
+      M.append_to_thinking(delta.delta)
+      
+    elseif delta_type == "tool_call" or delta_type == "tool_use" then
+      local tool = delta.toolCall or delta.tool or {}
+      M.add_tool_call(tool)
+      
+    elseif delta_type == "content_block_start" then
+      -- New content block started
+      
+    elseif delta_type == "content_block_stop" then
+      -- Content block ended
     end
-    -- Capture usage info if available
+    
     if event.usage then
       M.session_info.tokens.input = event.usage.prompt_tokens or M.session_info.tokens.input
       M.session_info.tokens.output = event.usage.completion_tokens or M.session_info.tokens.output
     end
 
-  elseif event.type == "error" then
+  elseif event_type == "tool_result" then
+    -- Tool execution completed - may contain diff/output
+    local result = event.result or event.output or event.content
+    local tool_name = event.tool_name or event.tool or "tool"
+
+    -- Check for file path in various locations
+    local filepath = event.file or event.filepath
+    if not filepath and event.args then
+      filepath = event.args.file or event.args.path
+    end
+    if not filepath and result then
+      if type(result) == "table" then
+        filepath = result.file or result.path or result.filepath
+      end
+    end
+
+    -- Open file if it's an edit/write operation
+    if filepath and (tool_name == "edit" or tool_name == "write") then
+      if not M.edited_files[filepath] then
+        M.edited_files[filepath] = true
+        vim.defer_fn(function()
+          M.open_file_in_other_window(filepath)
+        end, 100)
+      end
+    end
+
+    if result then
+      -- Format tool result nicely
+      local content
+      if type(result) == "table" then
+        -- Try to extract meaningful content
+        if result.diff then
+          content = "Diff:\n" .. result.diff
+        elseif result.output then
+          content = tostring(result.output)
+        else
+          content = vim.inspect(result)
+        end
+      else
+        content = tostring(result)
+      end
+
+      -- Truncate if too long
+      if #content > 1000 then
+        content = content:sub(1, 1000) .. "... (truncated)"
+      end
+
+      M.add_message("tool_result", "[" .. tool_name .. " result]:\n" .. content, false)
+    end
+
+  elseif event_type == "error" then
     M.is_streaming = false
     M.add_message("system", "Error: " .. (event.error or "Unknown error"), false)
-
-  elseif event.type == "tool_use" or event.type == "tool_result" or event.type == "tool_call" then
-    -- Track and open edited files
-    local filepath = nil
-    local tool_name = nil
-    
-    -- Try different event structures
-    if event.tool and event.tool.name then
-      tool_name = event.tool.name
-      if tool_name == "edit" or tool_name == "write" then
-        filepath = event.tool.arguments and (event.tool.arguments.file or event.tool.arguments.path)
-      end
-    elseif event.toolCall then
-      tool_name = event.toolCall.name or event.toolCall.tool
-      if tool_name == "edit" or tool_name == "write" then
-        filepath = event.toolCall.arguments and (event.toolCall.arguments.file or event.toolCall.arguments.path)
-      end
-    elseif event.tool_name then
-      tool_name = event.tool_name
-      if tool_name == "edit" or tool_name == "write" then
-        filepath = event.arguments and (event.arguments.file or event.arguments.path)
-      end
-    elseif event.name then
-      tool_name = event.name
-      if tool_name == "edit" or tool_name == "write" then
-        filepath = event.args and (event.args.file or event.args.path)
-      end
-    end
-
-    if filepath and not M.edited_files[filepath] then
-      M.edited_files[filepath] = true
-      M.open_file_in_other_window(filepath)
-    end
   end
+  
+  -- Always re-render after handling an event
+  M.render()
 end
 
--- Open a file in the window to the left of chat
 function M.open_file_in_other_window(filepath)
-  -- Only open if file exists
+  -- Expand ~ to home directory
+  filepath = vim.fn.expand(filepath)
+
   if vim.fn.filereadable(filepath) == 0 then
-    vim.notify("File not readable: " .. filepath, vim.log.levels.WARN)
+    vim.notify("File not found: " .. filepath, vim.log.levels.WARN)
     return
   end
 
-  -- Store current window (should be input)
+  -- Show status
+  vim.notify("Opening: " .. vim.fn.fnamemodify(filepath, ":~:."), vim.log.levels.INFO)
+
   local current_win = vim.api.nvim_get_current_win()
 
-  -- Find or create a non-chat window
-  local current_tab = vim.api.nvim_get_current_tabpage()
-  local wins = vim.api.nvim_tabpage_list_wins(current_tab)
-
-  -- Get our chat window IDs
-  local chat_wins = {}
-  if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
-    chat_wins[M.result_win] = true
+  -- Check if file is already open in a non-chat window
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if win ~= M.result_win and win ~= M.input_win then
+      local buf = vim.api.nvim_win_get_buf(win)
+      local buf_name = vim.api.nvim_buf_get_name(buf)
+      if buf_name == vim.fn.fnamemodify(filepath, ":p") then
+        -- File already open, just focus it briefly then return
+        vim.api.nvim_set_current_win(win)
+        vim.api.nvim_set_current_win(current_win)
+        return
+      end
+    end
   end
-  if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
-    chat_wins[M.input_win] = true
-  end
 
-  -- Find first non-chat window
+  -- Find or create target window
   local target_win = nil
-  for _, win in ipairs(wins) do
-    if not chat_wins[win] then
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if win ~= M.result_win and win ~= M.input_win then
       target_win = win
       break
     end
   end
 
-  -- If no other window exists, create one to the left
   if not target_win then
-    -- Go to leftmost window (code area)
-    vim.cmd("wincmd h")
-    -- Split if we're still in chat
-    if chat_wins[vim.api.nvim_get_current_win()] then
-      vim.cmd("topleft vsplit")
-    end
+    -- Create a new split to the left
+    vim.cmd("topleft vsplit")
     target_win = vim.api.nvim_get_current_win()
   end
 
@@ -318,20 +309,20 @@ function M.open_file_in_other_window(filepath)
   vim.api.nvim_set_current_win(target_win)
   local ok, err = pcall(vim.cmd, "edit " .. vim.fn.fnameescape(filepath))
   if not ok then
-    vim.notify("Edit failed: " .. tostring(err), vim.log.levels.ERROR)
+    vim.notify("Failed to open file: " .. tostring(err), vim.log.levels.ERROR)
+    vim.api.nvim_set_current_win(current_win)
+    return
   end
 
-  -- Return to input window
-  if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
-    vim.api.nvim_set_current_win(M.input_win)
-    vim.cmd("startinsert!")
-  else
-    -- Fallback to original window
-    vim.api.nvim_set_current_win(current_win)
-  end
+  -- Return to chat input
+  vim.defer_fn(function()
+    if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
+      vim.api.nvim_set_current_win(M.input_win)
+      vim.cmd("startinsert!")
+    end
+  end, 50)
 end
 
--- Add a message to the display
 function M.add_message(role, content, is_streaming)
   table.insert(M.messages, {
     role = role,
@@ -341,49 +332,61 @@ function M.add_message(role, content, is_streaming)
   M.render()
 end
 
--- Append to the currently streaming message
 function M.append_to_stream(text)
   M.current_response = M.current_response .. text
-
-  -- Update the last assistant message
+  
   for i = #M.messages, 1, -1 do
     if M.messages[i].role == "assistant" and M.messages[i].streaming then
-      M.messages[i].content = M.current_response
+      local full_content = M.current_response
+      if M.current_thinking ~= "" then
+        full_content = "💭 Thinking:\n" .. M.current_thinking .. "\n\n" .. M.current_response
+      end
+      M.messages[i].content = full_content
       break
     end
   end
-
-  M.render()
 end
 
--- Add tool call info
-function M.add_tool_call(tool_call)
-  local tool_name = tool_call and (tool_call.name or tool_call.tool) or "unknown"
-  local args = tool_call and (tool_call.arguments or tool_call.args) or {}
+function M.append_to_thinking(text)
+  M.current_thinking = M.current_thinking .. text
+  
+  for i = #M.messages, 1, -1 do
+    if M.messages[i].role == "assistant" and M.messages[i].streaming then
+      local full_content = M.current_response
+      if M.current_thinking ~= "" then
+        full_content = "💭 Thinking:\n" .. M.current_thinking .. "\n\n" .. M.current_response
+      end
+      M.messages[i].content = full_content
+      break
+    end
+  end
+end
+
+function M.add_tool_call(tool)
+  local tool_name = tool.name or tool.tool or "unknown"
+  local args = tool.arguments or tool.args or {}
   local filepath = args.file or args.path
 
-  local tool_text
-  if filepath and (tool_name == "edit" or tool_name == "write") then
-    tool_text = string.format("[%s: %s]", tool_name, filepath)
-    -- Try to open the file
-    if not M.edited_files[filepath] then
-      M.edited_files[filepath] = true
-      vim.notify("Opening: " .. filepath, vim.log.levels.INFO)
-      local ok, err = pcall(function()
-        M.open_file_in_other_window(filepath)
-      end)
-      if not ok then
-        vim.notify("Failed to open: " .. tostring(err), vim.log.levels.ERROR)
-      end
-    end
+  local display_text
+  if filepath then
+    display_text = string.format("🔧 %s: %s", tool_name, filepath)
   else
-    tool_text = string.format("[Using tool: %s]", tool_name)
+    display_text = string.format("🔧 %s", tool_name)
   end
 
-  M.add_message("tool", tool_text, false)
+  M.add_message("tool", display_text, false)
+
+  -- Open file immediately when tool is called (for edit/write tools)
+  if filepath and (tool_name == "edit" or tool_name == "write") then
+    if not M.edited_files[filepath] then
+      M.edited_files[filepath] = true
+      vim.defer_fn(function()
+        M.open_file_in_other_window(filepath)
+      end, 100)
+    end
+  end
 end
 
--- Finalize streaming message
 function M.finalize_streaming_message()
   for i = #M.messages, 1, -1 do
     if M.messages[i].streaming then
@@ -393,108 +396,94 @@ function M.finalize_streaming_message()
   end
 end
 
--- Render all messages to buffer (Pi TUI style)
 function M.render()
   if not M.result_buf or not vim.api.nvim_buf_is_valid(M.result_buf) then
     return
   end
 
   local lines = {}
-  local width = math.max(40, vim.api.nvim_win_get_width(M.result_win) - 4)
+  local width = math.max(40, (M.result_win and vim.api.nvim_win_is_valid(M.result_win)) and vim.api.nvim_win_get_width(M.result_win) - 4 or 40)
 
-  -- Title bar
+  -- Title
   table.insert(lines, "")
   table.insert(lines, "  ╭" .. string.rep("─", width - 4) .. "╮")
-  table.insert(lines, "  │" .. string.rep(" ", width - 4) .. "│")
-  
   local title = "π  Pi Chat"
   local title_padding = math.floor((width - 4 - #title) / 2)
   table.insert(lines, "  │" .. string.rep(" ", title_padding) .. title .. string.rep(" ", width - 4 - title_padding - #title) .. "│")
-  table.insert(lines, "  │" .. string.rep(" ", width - 4) .. "│")
   table.insert(lines, "  ╰" .. string.rep("─", width - 4) .. "╯")
   table.insert(lines, "")
 
-  -- Status line
+  -- Status
   local status_parts = {}
   if M.session_info.model then
     local model_name = M.session_info.model:match("([^/]+)$") or M.session_info.model
     table.insert(status_parts, "model: " .. model_name)
   end
   if M.session_info.tokens.input > 0 or M.session_info.tokens.output > 0 then
-    table.insert(status_parts, string.format("%.1f%%/%.0fk", 
-      (M.session_info.tokens.input / 1000), M.session_info.tokens.output / 1000))
+    table.insert(status_parts, string.format("%.1fk/%.1fk", M.session_info.tokens.input / 1000, M.session_info.tokens.output / 1000))
   end
   if M.is_streaming then
     table.insert(status_parts, "● working")
   end
 
   if #status_parts > 0 then
-    local status = "  " .. table.concat(status_parts, "  •  ")
-    table.insert(lines, status)
+    table.insert(lines, "  " .. table.concat(status_parts, "  •  "))
     table.insert(lines, "  " .. string.rep("─", width - 2))
     table.insert(lines, "")
   end
 
   -- Messages
-  for i, msg in ipairs(M.messages) do
+  for _, msg in ipairs(M.messages) do
     if msg.role == "user" then
-      -- User message - right aligned style
-      table.insert(lines, "  ┌─ You")
-      if msg.content and msg.content ~= "" then
-        for _, line in ipairs(vim.split(msg.content, "\n")) do
-          table.insert(lines, "  │ " .. line)
-        end
+      table.insert(lines, "  ┌─ 👤 You")
+      for _, line in ipairs(vim.split(msg.content, "\n")) do
+        table.insert(lines, "  │ " .. line)
       end
       table.insert(lines, "  └")
       
     elseif msg.role == "assistant" then
-      -- Pi message
       if msg.streaming then
-        table.insert(lines, "  ┌─ Pi " .. "⠋ thinking...")
+        table.insert(lines, "  ┌─ 🤖 Pi ●")
       else
-        table.insert(lines, "  ┌─ Pi")
+        table.insert(lines, "  ┌─ 🤖 Pi")
       end
-      if msg.content and msg.content ~= "" then
-        for _, line in ipairs(vim.split(msg.content, "\n")) do
-          table.insert(lines, "  │ " .. line)
-        end
+      for _, line in ipairs(vim.split(msg.content, "\n")) do
+        table.insert(lines, "  │ " .. line)
       end
       table.insert(lines, "  └")
       
     elseif msg.role == "tool" then
-      -- Tool call - dim
-      table.insert(lines, "  ○ " .. msg.content)
+      table.insert(lines, "  " .. msg.content)
+      
+    elseif msg.role == "tool_result" then
+      -- Show tool results in a compact format
+      for _, line in ipairs(vim.split(msg.content, "\n")) do
+        table.insert(lines, "  │ " .. line)
+      end
       
     elseif msg.role == "system" then
-      -- System/error message
-      table.insert(lines, "  ⚠ " .. msg.content)
+      table.insert(lines, "  ⚠️  " .. msg.content)
     end
-    
     table.insert(lines, "")
   end
 
   -- Footer
-  table.insert(lines, "")
   table.insert(lines, "  " .. string.rep("─", width - 2))
-  table.insert(lines, "  Press q to close • Enter to send • Shift+Enter for new line")
+  table.insert(lines, "  Enter=send  Shift+Enter=new line  q=close")
 
-  -- Update buffer
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(M.result_buf, 0, -1, false, lines)
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
 
-  -- Auto-scroll to bottom
   if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
     local line_count = vim.api.nvim_buf_line_count(M.result_buf)
     if line_count > 0 then
-      -- Scroll to near bottom but show some context
       local scroll_to = math.max(1, line_count - 3)
       vim.api.nvim_win_set_cursor(M.result_win, { scroll_to, 0 })
     end
   end
 end
 
--- Send message to Pi
 function M.send_message(text)
   local client = state.get("rpc_client")
   if not client then
@@ -502,37 +491,26 @@ function M.send_message(text)
     return
   end
 
-  -- Clear edited files tracking for new session
   M.edited_files = {}
-
-  -- Add user message immediately
   M.add_message("user", text, false)
-
-  -- Show streaming indicator
   M.is_streaming = true
   M.current_response = ""
+  M.current_thinking = ""
 
-  -- Send to Pi
   client:request("prompt", { type = "prompt", message = text }, function(result)
     vim.schedule(function()
       if result.error then
         M.is_streaming = false
         M.add_message("system", "Error: " .. result.error, false)
-        return
       end
-      -- Streaming will come via events
     end)
   end)
 end
 
--- Load conversation history and session info
 function M.load_history()
   local client = state.get("rpc_client")
-  if not client then
-    return
-  end
+  if not client then return end
 
-  -- Get session state for model info
   client:request("get_state", { type = "get_state" }, function(state_result)
     vim.schedule(function()
       if state_result.success and state_result.data then
@@ -542,12 +520,9 @@ function M.load_history()
         end
       end
 
-      -- Now get messages
       client:request("get_messages", { type = "get_messages" }, function(result)
         vim.schedule(function()
-          if result.error then
-            return
-          end
+          if result.error then return end
 
           local messages = result.data and result.data.messages or {}
           M.messages = {}
@@ -562,16 +537,14 @@ function M.load_history()
               for _, block in ipairs(msg.content) do
                 if block.type == "text" and block.text then
                   content = content .. block.text
+                elseif block.type == "thinking" and block.thinking then
+                  content = content .. "💭 " .. block.thinking .. "\n\n"
                 end
               end
             end
 
-            if role and content then
-              table.insert(M.messages, {
-                role = role,
-                content = content,
-                streaming = false,
-              })
+            if role then
+              table.insert(M.messages, { role = role, content = content, streaming = false })
             end
           end
 
@@ -582,14 +555,12 @@ function M.load_history()
   end)
 end
 
--- Close chat
 function M.close()
   if M.event_unsub then
     M.event_unsub()
     M.event_unsub = nil
   end
 
-  -- Close windows
   if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
     vim.api.nvim_win_close(M.input_win, true)
   end
@@ -597,7 +568,6 @@ function M.close()
     vim.api.nvim_win_close(M.result_win, true)
   end
 
-  -- Wipe buffers to free the names
   if M.input_buf and vim.api.nvim_buf_is_valid(M.input_buf) then
     vim.api.nvim_buf_delete(M.input_buf, { force = true })
   end
@@ -613,7 +583,6 @@ function M.close()
   state.update("ui.chat_open", false)
 end
 
--- Toggle chat
 function M.toggle()
   if M.is_open() then
     M.close()
@@ -622,7 +591,6 @@ function M.toggle()
   end
 end
 
--- Check if open
 function M.is_open()
   return M.result_win and vim.api.nvim_win_is_valid(M.result_win)
 end
