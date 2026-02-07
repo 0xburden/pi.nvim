@@ -223,17 +223,6 @@ function M.handle_event(event)
         M.append_to_stream(delta.delta)
       elseif delta.type == "tool_call" or delta.type == "tool_use" then
         M.add_tool_call(delta.toolCall or delta.tool)
-        -- Try to extract file from tool call
-        local tool = delta.toolCall or delta.tool or {}
-        local tool_name = tool.name or tool.tool
-        if tool_name == "edit" or tool_name == "write" then
-          local args = tool.arguments or tool.args or {}
-          local filepath = args.file or args.path
-          if filepath and not M.edited_files[filepath] then
-            M.edited_files[filepath] = true
-            M.open_file_in_other_window(filepath)
-          end
-        end
       end
     end
     -- Capture usage info if available
@@ -285,10 +274,14 @@ end
 function M.open_file_in_other_window(filepath)
   -- Only open if file exists
   if vim.fn.filereadable(filepath) == 0 then
+    vim.notify("File not readable: " .. filepath, vim.log.levels.WARN)
     return
   end
 
-  -- Find the leftmost window that's not our chat windows
+  -- Store current window (should be input)
+  local current_win = vim.api.nvim_get_current_win()
+
+  -- Find or create a non-chat window
   local current_tab = vim.api.nvim_get_current_tabpage()
   local wins = vim.api.nvim_tabpage_list_wins(current_tab)
 
@@ -301,7 +294,7 @@ function M.open_file_in_other_window(filepath)
     chat_wins[M.input_win] = true
   end
 
-  -- Find a non-chat window
+  -- Find first non-chat window
   local target_win = nil
   for _, win in ipairs(wins) do
     if not chat_wins[win] then
@@ -310,20 +303,31 @@ function M.open_file_in_other_window(filepath)
     end
   end
 
-  -- If no other window exists, create one
+  -- If no other window exists, create one to the left
   if not target_win then
-    vim.cmd("topleft vsplit")
+    -- Go to leftmost window (code area)
+    vim.cmd("wincmd h")
+    -- Split if we're still in chat
+    if chat_wins[vim.api.nvim_get_current_win()] then
+      vim.cmd("topleft vsplit")
+    end
     target_win = vim.api.nvim_get_current_win()
   end
 
-  -- Open the file in the target window
+  -- Open the file
   vim.api.nvim_set_current_win(target_win)
-  vim.cmd("edit " .. vim.fn.fnameescape(filepath))
+  local ok, err = pcall(vim.cmd, "edit " .. vim.fn.fnameescape(filepath))
+  if not ok then
+    vim.notify("Edit failed: " .. tostring(err), vim.log.levels.ERROR)
+  end
 
-  -- Return focus to input window
+  -- Return to input window
   if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
     vim.api.nvim_set_current_win(M.input_win)
     vim.cmd("startinsert!")
+  else
+    -- Fallback to original window
+    vim.api.nvim_set_current_win(current_win)
   end
 end
 
@@ -357,14 +361,25 @@ function M.add_tool_call(tool_call)
   local tool_name = tool_call and (tool_call.name or tool_call.tool) or "unknown"
   local args = tool_call and (tool_call.arguments or tool_call.args) or {}
   local filepath = args.file or args.path
-  
+
   local tool_text
   if filepath and (tool_name == "edit" or tool_name == "write") then
     tool_text = string.format("[%s: %s]", tool_name, filepath)
+    -- Try to open the file
+    if not M.edited_files[filepath] then
+      M.edited_files[filepath] = true
+      vim.notify("Opening: " .. filepath, vim.log.levels.INFO)
+      local ok, err = pcall(function()
+        M.open_file_in_other_window(filepath)
+      end)
+      if not ok then
+        vim.notify("Failed to open: " .. tostring(err), vim.log.levels.ERROR)
+      end
+    end
   else
     tool_text = string.format("[Using tool: %s]", tool_name)
   end
-  
+
   M.add_message("tool", tool_text, false)
 end
 
