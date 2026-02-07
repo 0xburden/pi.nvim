@@ -37,7 +37,9 @@ function M.update_status()
   end
   
   local status = M.get_status_text()
+  vim.api.nvim_buf_set_option(M.status_buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(M.status_buf, 0, -1, false, { status })
+  vim.api.nvim_buf_set_option(M.status_buf, "modifiable", false)
 end
 
 -- Open chat interface
