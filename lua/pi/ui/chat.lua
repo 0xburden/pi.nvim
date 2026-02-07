@@ -467,22 +467,27 @@ function M.render()
 
   local lines = {}
   local highlights = {}
-  local function mark_last_line(group)
-    table.insert(highlights, { line = #lines - 1, group = group })
+  local function add_line(text, hl)
+    table.insert(lines, text)
+    if hl then
+      table.insert(highlights, { line = #lines - 1, group = hl })
+    end
+  end
+  local function ensure_separator()
+    if #lines == 0 or lines[#lines] == "" then
+      return
+    end
+    table.insert(lines, "")
+  end
+  local function add_message_lines(content, hl)
+    for _, line in ipairs(vim.split(content or "", "\n")) do
+      add_line("  " .. line, hl)
+    end
   end
 
   local width = math.max(40, (M.result_win and vim.api.nvim_win_is_valid(M.result_win)) and vim.api.nvim_win_get_width(M.result_win) - 4 or 40)
 
-  -- Title
-  table.insert(lines, "")
-  table.insert(lines, "  ╭" .. string.rep("─", width - 4) .. "╮")
-  local title = "π  Pi Chat"
-  local title_padding = math.floor((width - 4 - #title) / 2)
-  table.insert(lines, "  │" .. string.rep(" ", title_padding) .. title .. string.rep(" ", width - 4 - title_padding - #title) .. "│")
-  table.insert(lines, "  ╰" .. string.rep("─", width - 4) .. "╯")
-  table.insert(lines, "")
-
-  -- Status
+  -- Status line
   local status_parts = {}
   if M.session_info.model then
     local model_name = M.session_info.model:match("([^/]+)$") or M.session_info.model
@@ -496,27 +501,18 @@ function M.render()
   end
 
   if #status_parts > 0 then
-    table.insert(lines, "  " .. table.concat(status_parts, "  •  "))
-    table.insert(lines, "  " .. string.rep("─", width - 2))
-    table.insert(lines, "")
+    add_line("  " .. table.concat(status_parts, "  •  "))
+    add_line("  " .. string.rep("─", width - 2))
   end
 
   -- Messages
   for _, msg in ipairs(M.messages) do
+    ensure_separator()
+
     if msg.role == "user" then
-      table.insert(lines, "  ┌─ 👤 You")
-      for _, line in ipairs(vim.split(msg.content or "", "\n")) do
-        table.insert(lines, "  │ " .. line)
-        mark_last_line(USER_PROMPT_HL)
-      end
-      table.insert(lines, "  └")
+      add_message_lines(msg.content, USER_PROMPT_HL)
 
     elseif msg.role == "assistant" then
-      if msg.streaming then
-        table.insert(lines, "  ┌─ 🤖 Pi ●")
-      else
-        table.insert(lines, "  ┌─ 🤖 Pi")
-      end
       local thinking_block = false
       for _, raw in ipairs(vim.split(msg.content or "", "\n")) do
         local text_line = raw or ""
@@ -526,30 +522,23 @@ function M.render()
         elseif thinking_block and text_line:match("^%s*$") then
           thinking_block = false
         end
-        table.insert(lines, "  │ " .. text_line)
-        if is_thinking_line or (thinking_block and not text_line:match("^%s*$")) then
-          mark_last_line(THINKING_HL)
-        end
+        add_line("  " .. text_line, (is_thinking_line or (thinking_block and not text_line:match("^%s*$"))) and THINKING_HL or nil)
       end
-      table.insert(lines, "  └")
 
     elseif msg.role == "tool" then
-      table.insert(lines, "  " .. msg.content)
+      add_message_lines(msg.content)
 
     elseif msg.role == "tool_result" then
-      for _, line in ipairs(vim.split(msg.content or "", "\n")) do
-        table.insert(lines, "  │ " .. line)
-      end
+      add_message_lines(msg.content)
 
     elseif msg.role == "system" then
-      table.insert(lines, "  ⚠️  " .. msg.content)
+      add_line("  ⚠️  " .. msg.content)
     end
-    table.insert(lines, "")
   end
 
-  -- Footer
-  table.insert(lines, "  " .. string.rep("─", width - 2))
-  table.insert(lines, "  Enter=send  Shift+Enter=new line  q=close")
+  ensure_separator()
+  add_line("  " .. string.rep("─", width - 2))
+  add_line("  Enter=send  Shift+Enter=new line  q=close")
 
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(M.result_buf, 0, -1, false, lines)
@@ -567,8 +556,7 @@ function M.render()
       vim.api.nvim_win_set_cursor(M.result_win, { scroll_to, 0 })
     end
   end
-end
-function M.send_message(text)
+endfunction M.send_message(text)
   local client = state.get("rpc_client")
   if not client then
     vim.notify("Pi: Not connected", vim.log.levels.ERROR)
