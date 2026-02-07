@@ -34,11 +34,9 @@ function M:connect(callback)
   self.job_id = vim.fn.jobstart(cmd, {
     on_stdout = function(_, data, _)
       if data then
-        for _, line in ipairs(data) do
-          if line ~= "" then
-            vim.schedule(function()
-              client:_handle_line(line)
-            end)
+        for _, chunk in ipairs(data) do
+          if chunk ~= "" then
+            client:_handle_chunk(chunk)
           end
         end
       end
@@ -120,11 +118,29 @@ local function append_rpc_log(line)
   vim.fn.writefile({ entry }, log_path, "a")
 end
 
+function M:_handle_chunk(chunk)
+  self.buffer = self.buffer .. chunk
+  while true do
+    local newline = self.buffer:find("\n")
+    if not newline then
+      break
+    end
+    local line = self.buffer:sub(1, newline - 1)
+    self.buffer = self.buffer:sub(newline + 1)
+    line = line:gsub("\r$", "")
+    if line ~= "" then
+      local client = self
+      vim.schedule(function()
+        client:_handle_line(line)
+      end)
+    end
+  end
+end
+
 function M:_handle_line(line)
   pcall(append_rpc_log, line)
   local ok, message = pcall(vim.json.decode, line)
   if not ok then
-    vim.notify("Pi: Failed to parse JSON: " .. line:sub(1, 100), vim.log.levels.ERROR)
     return
   end
 
