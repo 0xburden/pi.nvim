@@ -112,7 +112,16 @@ function M:request(method, params, callback)
   vim.fn.chansend(self.job_id, json)
 end
 
+local function append_rpc_log(line)
+  local log_dir = vim.fn.stdpath("cache") .. "/pi_rpc"
+  local log_path = log_dir .. "/events.log"
+  vim.fn.mkdir(log_dir, "p")
+  local entry = string.format("[%s] %s", os.date("%Y-%m-%d %H:%M:%S"), line)
+  vim.fn.writefile({ entry }, log_path, "a")
+end
+
 function M:_handle_line(line)
+  pcall(append_rpc_log, line)
   local ok, message = pcall(vim.json.decode, line)
   if not ok then
     vim.notify("Pi: Failed to parse JSON: " .. line:sub(1, 100), vim.log.levels.ERROR)
