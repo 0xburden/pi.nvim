@@ -1,58 +1,49 @@
 local M = {}
 
--- List available sessions
 function M.list(client, callback)
-  client:request("session.list", {}, function(result)
-    if result and not result.error then
-      local state = require("pi.state")
-      state.update("sessions.available", result.sessions or {})
-    end
-    
-    if callback then callback(result) end
+  client:request("get_state", { type = "get_state" }, function(result)
+    vim.schedule(function()
+      if result and result.success and result.data then
+        local sessions = {}
+        if result.data.sessionFile then
+          table.insert(sessions, {
+            id = result.data.sessionId or "current",
+            name = result.data.sessionName or "Current Session",
+            file = result.data.sessionFile,
+          })
+        end
+        require("pi.state").update("sessions.available", sessions)
+      end
+      if callback then callback({ sessions = require("pi.state").get("sessions.available") }) end
+    end)
   end)
 end
 
--- Load a session
-function M.load(client, session_id, callback)
-  client:request("session.load", { id = session_id }, function(result)
-    if result and not result.error then
-      local state = require("pi.state")
-      state.update("sessions.current", result.session)
-      
-      local events = require("pi.events")
-      events.emit("session_changed", result.session)
-    end
-    
-    if callback then callback(result) end
-  end)
-end
-
--- Save current session
-function M.save(client, name, callback)
-  client:request("session.save", { name = name }, function(result)
-    if result and not result.error then
-      local events = require("pi.events")
-      events.emit("session_changed", result.session)
-    end
-    
-    if callback then callback(result) end
-  end)
-end
-
--- Delete a session
-function M.delete(client, session_id, callback)
-  client:request("session.delete", { id = session_id }, callback)
-end
-
--- Get current session
 function M.current(client, callback)
-  client:request("session.current", {}, function(result)
-    if result and not result.error then
-      local state = require("pi.state")
-      state.update("sessions.current", result.session)
-    end
-    
-    if callback then callback(result) end
+  client:request("get_state", { type = "get_state" }, function(result)
+    vim.schedule(function()
+      if result and result.success then
+        require("pi.state").update("sessions.current", result.data)
+      end
+      if callback then callback(result) end
+    end)
+  end)
+end
+
+function M.new(client, opts, callback)
+  opts = opts or {}
+  local params = { type = "new_session" }
+  if opts.parentSession then
+    params.parentSession = opts.parentSession
+  end
+  client:request("new_session", params, function(result)
+    vim.schedule(function()
+      if result and result.success then
+        local events = require("pi.events")
+        events.emit("session_changed", result.data)
+      end
+      if callback then callback(result) end
+    end)
   end)
 end
 

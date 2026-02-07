@@ -1,141 +1,138 @@
-local uv = vim.loop
-local json = vim.json or vim.fn.json_decode
+local M = {}
 
-local Client = {}
-Client.__index = Client
-
--- Create new RPC client instance
-function Client.new(opts)
-  local self = setmetatable({}, Client)
-  self.host = opts.host or "127.0.0.1"
-  self.port = opts.port or 43863
-  self.socket = nil
-  self.connected = false
-  self.request_id = 0
-  self.pending = {}  -- pending request callbacks
-  self.buffer = ""   -- buffer for incomplete JSON messages
+function M.new(opts)
+  local self = {
+    host = opts.host or "127.0.0.1",
+    port = opts.port or 43863,
+    job_id = nil,
+    connected = false,
+    request_id = 0,
+    pending = {},
+    buffer = "",
+    on_event = nil,
+  }
+  setmetatable(self, { __index = M })
   return self
 end
 
--- Connect to Pi RPC server
-function Client:connect(callback)
-  self.socket = uv.new_tcp()
-  
-  self.socket:connect(self.host, self.port, function(err)
-    if err then
-      callback(false, "Connection failed: " .. err)
-      return
-    end
-    
-    self.connected = true
-    
-    -- Start reading responses
-    self.socket:read_start(function(read_err, chunk)
-      if read_err then
-        self:_handle_error(read_err)
-        return
-      end
-      
-      if chunk then
-        self:_handle_data(chunk)
-      else
-        -- Connection closed
-        self:disconnect()
-      end
+function M:connect(callback)
+  if self.job_id then
+    vim.schedule(function()
+      callback(true)
     end)
-    
-    callback(true)
-  end)
-end
-
--- Disconnect from server
-function Client:disconnect()
-  if self.socket and not self.socket:is_closing() then
-    self.socket:close()
-  end
-  self.connected = false
-  self.socket = nil
-end
-
--- Send RPC request
-function Client:request(method, params, callback)
-  if not self.connected then
-    callback({ error = "Not connected" })
     return
   end
-  
-  self.request_id = self.request_id + 1
-  local id = self.request_id
-  
-  local message = {
-    jsonrpc = "2.0",
-    id = id,
-    method = method,
-    params = params or {}
-  }
-  
-  -- Store callback for this request
-  self.pending[id] = callback
-  
-  -- Send request
-  local data = vim.json.encode(message) .. "\n"
-  self.socket:write(data)
+
+  local cmd = { "pi", "--mode", "rpc" }
+  if self.port then
+    table.insert(cmd, "--rpc-port")
+    table.insert(cmd, tostring(self.port))
+  end
+
+  local client = self
+
+  self.job_id = vim.fn.jobstart(cmd, {
+    on_stdout = function(_, data, _)
+      if data then
+        for _, line in ipairs(data) do
+          if line ~= "" then
+            vim.schedule(function()
+              client:_handle_line(line)
+            end)
+          end
+        end
+      end
+    end,
+    on_stderr = function(_, data, _)
+      if data then
+        for _, line in ipairs(data) do
+          if line ~= "" then
+            vim.schedule(function()
+              vim.notify("Pi stderr: " .. line, vim.log.levels.WARN)
+            end)
+          end
+        end
+      end
+    end,
+    on_exit = function(_, code, _)
+      vim.schedule(function()
+        vim.notify("Pi process exited with code " .. code, vim.log.levels.INFO)
+      end)
+      self.job_id = nil
+      self.connected = false
+    end,
+    stdout_buffered = false,
+  })
+
+  if self.job_id <= 0 then
+    vim.schedule(function()
+      callback(false, "Failed to start pi process")
+    end)
+    return
+  end
+
+  self.connected = true
+  vim.defer_fn(function()
+    callback(true)
+  end, 500)
 end
 
--- Handle incoming data (may be partial JSON)
-function Client:_handle_data(chunk)
-  self.buffer = self.buffer .. chunk
-  
-  -- Try to extract complete JSON messages
-  while true do
-    local newline = self.buffer:find("\n")
-    if not newline then break end
-    
-    local line = self.buffer:sub(1, newline - 1)
-    self.buffer = self.buffer:sub(newline + 1)
-    
-    -- Parse and handle message
-    local ok, message = pcall(vim.json.decode, line)
-    if ok then
-      self:_handle_message(message)
-    else
-      vim.notify("Pi: Failed to parse JSON: " .. line, vim.log.levels.ERROR)
-    end
+function M:disconnect()
+  if self.job_id then
+    vim.fn.jobstop(self.job_id)
+    self.job_id = nil
+    self.connected = false
   end
 end
 
--- Handle complete JSON message
-function Client:_handle_message(message)
-  if message.id then
-    -- This is a response to our request
+function M:request(method, params, callback)
+  if not self.connected or not self.job_id then
+    vim.schedule(function()
+      callback({ error = "Not connected" })
+    end)
+    return
+  end
+
+  self.request_id = self.request_id + 1
+  local id = tostring(self.request_id)
+
+  local cmd = {
+    type = params.type or method,
+    id = id,
+  }
+  for k, v in pairs(params) do
+    if k ~= "type" then
+      cmd[k] = v
+    end
+  end
+
+  self.pending[id] = callback
+
+  local json = vim.json.encode(cmd) .. "\n"
+  vim.fn.chansend(self.job_id, json)
+end
+
+function M:_handle_line(line)
+  local ok, message = pcall(vim.json.decode, line)
+  if not ok then
+    vim.notify("Pi: Failed to parse JSON: " .. line:sub(1, 100), vim.log.levels.ERROR)
+    return
+  end
+
+  if message.type == "response" and message.id then
     local callback = self.pending[message.id]
     if callback then
       self.pending[message.id] = nil
-      -- Schedule callback on main thread
-      vim.schedule(function()
-        callback(message.result or message.error)
-      end)
+      if message.success then
+        callback({ success = true, data = message.data })
+      else
+        callback({ error = message.error or "Unknown error" })
+      end
     end
-  else
-    -- This is a notification/event
-    self:_handle_event(message)
+  elseif message.type == "event" or message.type == "message_update" or message.type == "agent_start" or message.type == "agent_end" then
+    local events = require("pi.events")
+    events.emit("rpc_event", message)
   end
 end
 
--- Handle server events (notifications)
-function Client:_handle_event(event)
-  local events = require("pi.events")
-  vim.schedule(function()
-    events.emit("rpc_event", event)
-  end)
-end
-
--- Handle errors
-function Client:_handle_error(err)
-  vim.schedule(function()
-    vim.notify("Pi RPC error: " .. tostring(err), vim.log.levels.ERROR)
-  end)
-  self:disconnect()
-end
-
-return Client
+return M

@@ -7,24 +7,11 @@ vim.g.loaded_pi = true
 -- Main commands
 vim.api.nvim_create_user_command("PiConnect", function()
   require("pi").connect()
-end, {})
+end, { desc = "Connect to Pi RPC process" })
 
 vim.api.nvim_create_user_command("PiDisconnect", function()
   require("pi").disconnect()
-end, {})
-
--- Spawn/stop Pi RPC process
-vim.api.nvim_create_user_command("PiSpawn", function()
-  require("pi").spawn(function(success)
-    if success then
-      vim.notify("Pi: Spawned successfully", vim.log.levels.INFO)
-    end
-  end)
-end, { desc = "Spawn Pi RPC server process" })
-
-vim.api.nvim_create_user_command("PiStopProcess", function()
-  require("pi").stop_process()
-end, { desc = "Stop the spawned Pi RPC process" })
+end, { desc = "Disconnect from Pi" })
 
 vim.api.nvim_create_user_command("PiStart", function(opts)
   local task = opts.args
@@ -33,32 +20,33 @@ vim.api.nvim_create_user_command("PiStart", function(opts)
     return
   end
   require("pi").start(task)
-end, { nargs = "+", desc = "Start Pi agent with task (auto-spawns if needed)" })
+end, { nargs = "+", desc = "Start Pi agent with task" })
 
 vim.api.nvim_create_user_command("PiPause", function()
   require("pi").pause()
-end, {})
+end, { desc = "Pause the agent" })
 
 vim.api.nvim_create_user_command("PiResume", function()
   require("pi").resume()
-end, {})
+end, { desc = "Resume the agent" })
 
 vim.api.nvim_create_user_command("PiStop", function()
   require("pi").stop()
-end, {})
+end, { desc = "Stop/abort the agent" })
 
--- UI commands with auto-spawn
+-- UI commands
 vim.api.nvim_create_user_command("PiToggle", function()
   local pi = require("pi")
-  -- Auto-spawn and connect if needed, then toggle panel
-  pi.ensure_connected({ auto_spawn = true }, function(connected)
-    if connected then
-      require("pi.ui.control_panel").toggle()
-    else
-      vim.notify("Pi: Could not connect to agent", vim.log.levels.ERROR)
-    end
-  end)
-end, { desc = "Toggle Pi control panel (auto-spawns if needed)" })
+  if not require("pi.state").get("connected") then
+    pi.connect(function(success)
+      if success then
+        require("pi.ui.control_panel").toggle()
+      end
+    end)
+  else
+    require("pi.ui.control_panel").toggle()
+  end
+end, { desc = "Toggle Pi control panel (auto-connects)" })
 
 vim.api.nvim_create_user_command("PiLogs", function()
   require("pi.ui.logs_viewer").toggle()
@@ -66,15 +54,16 @@ end, { desc = "Toggle Pi logs viewer" })
 
 vim.api.nvim_create_user_command("PiChat", function()
   local pi = require("pi")
-  -- Auto-spawn and connect if needed, then open chat
-  pi.ensure_connected({ auto_spawn = true }, function(connected)
-    if connected then
-      require("pi.ui.chat").toggle()
-    else
-      vim.notify("Pi: Could not connect to agent", vim.log.levels.ERROR)
-    end
-  end)
-end, { desc = "Toggle Pi chat interface (auto-spawns if needed)" })
+  if not require("pi.state").get("connected") then
+    pi.connect(function(success)
+      if success then
+        require("pi.ui.chat").toggle()
+      end
+    end)
+  else
+    require("pi.ui.chat").toggle()
+  end
+end, { desc = "Toggle Pi chat (auto-connects)" })
 
 vim.api.nvim_create_user_command("PiDiff", function(opts)
   local filepath = opts.args
@@ -94,57 +83,31 @@ vim.api.nvim_create_user_command("PiReject", function()
 end, { desc = "Reject pending change" })
 
 -- Session commands
-vim.api.nvim_create_user_command("PiSessionList", function()
+vim.api.nvim_create_user_command("PiSession", function()
   local client = require("pi.state").get("rpc_client")
   local session = require("pi.rpc.session")
-
-  session.list(client, function(result)
-    if result.error then
-      vim.notify("Failed to list sessions: " .. result.error, vim.log.levels.ERROR)
-      return
-    end
-
-    if #result.sessions == 0 then
-      vim.notify("No saved sessions", vim.log.levels.INFO)
-      return
-    end
-
-    print("Available sessions:")
-    for _, s in ipairs(result.sessions) do
-      print(string.format("  %s - %s", s.id, s.name or "Unnamed"))
-    end
-  end)
-end, { desc = "List available sessions" })
-
-vim.api.nvim_create_user_command("PiSessionLoad", function(opts)
-  local session_id = opts.args
-  if session_id == "" then
-    vim.notify("Usage: :PiSessionLoad <session_id>", vim.log.levels.ERROR)
-    return
-  end
-
-  local client = require("pi.state").get("rpc_client")
-  local session = require("pi.rpc.session")
-
-  session.load(client, session_id, function(result)
-    if result.error then
-      vim.notify("Failed to load session: " .. result.error, vim.log.levels.ERROR)
+  session.current(client, function(result)
+    if result and result.success and result.data then
+      local data = result.data
+      print("Current Session:")
+      print("  ID: " .. (data.sessionId or "none"))
+      print("  Name: " .. (data.sessionName or "unnamed"))
+      print("  File: " .. (data.sessionFile or "none"))
+      print("  Messages: " .. (data.messageCount or 0))
     else
-      vim.notify("Session loaded!", vim.log.levels.INFO)
+      vim.notify("No active session", vim.log.levels.INFO)
     end
   end)
-end, { nargs = 1, desc = "Load a session" })
+end, { desc = "Show current session info" })
 
-vim.api.nvim_create_user_command("PiSessionSave", function(opts)
-  local name = opts.args
+vim.api.nvim_create_user_command("PiSessionNew", function(opts)
   local client = require("pi.state").get("rpc_client")
   local session = require("pi.rpc.session")
-
-  session.save(client, name, function(result)
-    if result.error then
-      vim.notify("Failed to save session: " .. result.error, vim.log.levels.ERROR)
+  session.new(client, {}, function(result)
+    if result and result.success then
+      vim.notify("New session started", vim.log.levels.INFO)
     else
-      vim.notify("Session saved!", vim.log.levels.INFO)
+      vim.notify("Failed to start new session", vim.log.levels.ERROR)
     end
   end)
-end, { nargs = "?", desc = "Save current session" })
+end, { desc = "Start a new session" })
