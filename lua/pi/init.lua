@@ -201,32 +201,34 @@ end
 -- Connect to Pi agent
 function M.connect(callback)
   local client = M.state.get("rpc_client")
-  
+
   if not client then
     vim.notify("Pi: Client not initialized", vim.log.levels.ERROR)
     return
   end
-  
+
   client:connect(function(success, err)
-    if success then
-      M.state.update("connected", true)
-      vim.notify("Pi: Connected to agent", vim.log.levels.INFO)
-      
-      -- Auto-open control panel if configured
-      if M.config.get("auto_open_panel") then
-        require("pi.ui.control_panel").open()
+    vim.schedule(function()
+      if success then
+        M.state.update("connected", true)
+        vim.notify("Pi: Connected to agent", vim.log.levels.INFO)
+
+        -- Auto-open control panel if configured
+        if M.config.get("auto_open_panel") then
+          require("pi.ui.control_panel").open()
+        end
+
+        -- Start log streaming if configured
+        if M.config.get("auto_stream_logs") then
+          local logs = require("pi.rpc.logs")
+          logs.stream(client)
+        end
+      else
+        vim.notify("Pi: Connection failed - " .. tostring(err), vim.log.levels.ERROR)
       end
-      
-      -- Start log streaming if configured
-      if M.config.get("auto_stream_logs") then
-        local logs = require("pi.rpc.logs")
-        logs.stream(client)
-      end
-    else
-      vim.notify("Pi: Connection failed - " .. err, vim.log.levels.ERROR)
-    end
-    
-    if callback then callback(success, err) end
+
+      if callback then callback(success, err) end
+    end)
   end)
 end
 
