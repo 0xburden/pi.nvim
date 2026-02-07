@@ -98,6 +98,10 @@ M.session_info = {
 -- Pending file paths to open after edits
 M.pending_file_paths = {}
 M.tool_call_context = {}
+M.tool_spinner_active = false
+M.tool_spinner_label = nil
+M.spinner_frames = { "⠋", "⠙", "⠚", "⠞", "⠖", "⠦", "⠴", "⠲", "⠳", "⠓" }
+M.spinner_index = 1
 
 -- Constants
 M.RESULT_BUF_NAME = "PiChat"
@@ -164,6 +168,24 @@ local function register_tool_call_context(tool)
     entry.command = command
   end
   M.tool_call_context[id] = entry
+end
+
+local function start_tool_spinner(tool)
+  local label = tool.name or tool.tool or "tool"
+  local args = tool.arguments or tool.args or {}
+  if args.command then
+    label = string.format("%s (%s)", label, args.command)
+  end
+  M.tool_spinner_label = label
+  M.tool_spinner_active = true
+  if not M.spinner_index or M.spinner_index < 1 then
+    M.spinner_index = 1
+  end
+end
+
+local function stop_tool_spinner()
+  M.tool_spinner_active = false
+  M.tool_spinner_label = nil
 end
 
 local try_open_file
@@ -347,6 +369,7 @@ function M.handle_event(event)
     M.current_response = ""
     M.current_thinking = ""
     M.add_message("assistant", "", true)
+    stop_tool_spinner()
 
   elseif event_type == "agent_end" then
     M.is_streaming = false
@@ -355,6 +378,7 @@ function M.handle_event(event)
     M.current_thinking = ""
     M.pending_file_paths = {}
     M.tool_call_context = {}
+    stop_tool_spinner()
 
   elseif event_type == "message_update" then
     local delta = event.assistantMessageEvent
@@ -371,11 +395,14 @@ function M.handle_event(event)
     elseif delta_type == "tool_call" or delta_type == "tool_use" or delta_type == "toolcall_start" then
       local tool = delta.toolCall or delta.tool or {}
       register_tool_call_context(tool)
-      M.add_tool_call(tool)
+      start_tool_spinner(tool)
       
     elseif delta_type == "toolcall_delta" or delta_type == "toolcall_end" then
       local tool = delta.toolCall or delta.tool or {}
       register_tool_call_context(tool)
+      if not M.tool_spinner_active then
+        start_tool_spinner(tool)
+      end
 
     elseif delta_type == "content_block_start" then
       -- New content block started
@@ -470,6 +497,7 @@ function M.handle_event(event)
 
     local display = result_text ~= "" and result_text or "(no output)"
     M.add_message("tool_result", display, false)
+    stop_tool_spinner()
     flush_pending_file_paths()
   end
 
@@ -671,6 +699,14 @@ function M.render()
     elseif msg.role == "system" then
       add_line("  ⚠️  " .. msg.content)
     end
+  end
+
+  if M.tool_spinner_active then
+    ensure_separator()
+    local frame = M.spinner_frames[M.spinner_index] or M.spinner_frames[1]
+    local label = M.tool_spinner_label or "tool"
+    add_line(string.format("  %s Running %s...", frame, label))
+    M.spinner_index = (M.spinner_index % #M.spinner_frames) + 1
   end
 
   ensure_separator()
