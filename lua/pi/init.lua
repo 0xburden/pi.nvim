@@ -31,13 +31,21 @@ end
 function M.is_running(callback)
   local client = M.state.get("rpc_client")
   if not client then
-    callback(false)
+    vim.schedule(function() callback(false) end)
     return
   end
 
   -- Try to connect with short timeout
   local timer = vim.loop.new_timer()
   local connected = false
+  local callback_called = false
+
+  local function safe_callback(result)
+    if not callback_called then
+      callback_called = true
+      vim.schedule(function() callback(result) end)
+    end
+  end
 
   client:connect(function(success, err)
     connected = success
@@ -49,17 +57,17 @@ function M.is_running(callback)
       timer:stop()
       timer:close()
     end
-    callback(success)
+    safe_callback(success)
   end)
 
   -- Timeout after 500ms
-  timer:start(500, 0, vim.schedule_wrap(function()
+  timer:start(500, 0, function()
     if not connected then
       client:disconnect()
       timer:close()
-      callback(false)
+      safe_callback(false)
     end
-  end))
+  end)
 end
 
 -- Spawn Pi with RPC enabled
@@ -156,7 +164,7 @@ function M.ensure_connected(opts, callback)
 
   -- Already connected?
   if M.state.get("connected") then
-    if callback then callback(true) end
+    if callback then vim.schedule(function() callback(true) end) end
     return
   end
 
@@ -182,8 +190,10 @@ function M.ensure_connected(opts, callback)
         end
       end)
     else
-      vim.notify("Pi: Not running and auto-spawn disabled", vim.log.levels.ERROR)
-      if callback then callback(false) end
+      vim.schedule(function()
+        vim.notify("Pi: Not running and auto-spawn disabled", vim.log.levels.ERROR)
+      end)
+      if callback then vim.schedule(function() callback(false) end) end
     end
   end)
 end
