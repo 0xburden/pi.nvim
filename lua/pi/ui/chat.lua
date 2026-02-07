@@ -96,6 +96,7 @@ M.session_info = {
 
 -- Pending file paths to open after edits
 M.pending_file_paths = {}
+M.tool_call_context = {}
 
 -- Constants
 M.RESULT_BUF_NAME = "PiChat"
@@ -137,6 +138,21 @@ local function queue_text_path(text)
   if path then
     queue_file_path(path)
   end
+end
+
+local function register_tool_call_context(tool)
+  local id = tool.id or tool.toolCallId
+  if not id then
+    return
+  end
+  local entry = M.tool_call_context[id] or {}
+  entry.name = tool.name or tool.tool or entry.name
+  local args = tool.arguments or tool.args or {}
+  local direct = args.file or args.path or args.filepath
+  if direct then
+    entry.filepath = normalize_path(direct)
+  end
+  M.tool_call_context[id] = entry
 end
 
 local function flush_pending_file_paths()
@@ -325,6 +341,7 @@ function M.handle_event(event)
     M.current_response = ""
     M.current_thinking = ""
     M.pending_file_paths = {}
+    M.tool_call_context = {}
 
   elseif event_type == "message_update" then
     local delta = event.assistantMessageEvent
@@ -338,11 +355,15 @@ function M.handle_event(event)
     elseif delta_type == "thinking_delta" and delta.delta then
       M.append_to_thinking(delta.delta)
       
-    elseif delta_type == "tool_call" or delta_type == "tool_use" 
-      or delta_type == "toolcall_start" or delta_type == "toolcall_delta" or delta_type == "toolcall_end" then
+    elseif delta_type == "tool_call" or delta_type == "tool_use" or delta_type == "toolcall_start" then
       local tool = delta.toolCall or delta.tool or {}
+      register_tool_call_context(tool)
       M.add_tool_call(tool)
       
+    elseif delta_type == "toolcall_delta" or delta_type == "toolcall_end" then
+      local tool = delta.toolCall or delta.tool or {}
+      register_tool_call_context(tool)
+
     elseif delta_type == "content_block_start" then
       -- New content block started
       
@@ -397,6 +418,15 @@ function M.handle_event(event)
   end
 
   if event.type == "message_end" and event.message and event.message.role == "toolResult" then
+    local tool_id = event.message.toolCallId
+    if tool_id then
+      local context = M.tool_call_context[tool_id]
+      if context and context.filepath then
+        queue_file_path(context.filepath)
+      end
+      M.tool_call_context[tool_id] = nil
+    end
+
     local tool_name = event.message.toolName or event.message.tool or "tool"
     local tool_message_parts = {}
     for _, chunk in ipairs(event.message.content or {}) do
