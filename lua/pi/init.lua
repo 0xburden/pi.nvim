@@ -73,15 +73,22 @@ end
 -- Spawn Pi with RPC enabled
 function M.spawn(callback)
   if M.pi_process then
-    vim.notify("Pi: Process already spawned", vim.log.levels.WARN)
-    if callback then callback(true) end
+    vim.schedule(function()
+      vim.notify("Pi: Process already spawned (PID: " .. M.pi_process.pid .. ")", vim.log.levels.WARN)
+    end)
+    if callback then vim.schedule(function() callback(true) end) end
     return
   end
 
   local uv = vim.loop
   local port = M.config.get("port") or 43863
 
-  vim.notify("Pi: Starting RPC server on port " .. port .. "...", vim.log.levels.INFO)
+  vim.schedule(function()
+    vim.notify("Pi: Starting RPC server on port " .. port .. "...", vim.log.levels.INFO)
+  end)
+
+  -- Collect stderr for error reporting
+  local stderr_data = {}
 
   -- Spawn pi with RPC flag
   local handle, pid
@@ -106,8 +113,10 @@ function M.spawn(callback)
   end)
 
   if not handle then
-    vim.notify("Pi: Failed to spawn process. Is 'pi' in your PATH?", vim.log.levels.ERROR)
-    if callback then callback(false) end
+    vim.schedule(function()
+      vim.notify("Pi: Failed to spawn process. Is 'pi' in your PATH?", vim.log.levels.ERROR)
+    end)
+    if callback then vim.schedule(function() callback(false) end) end
     return
   end
 
@@ -120,9 +129,12 @@ function M.spawn(callback)
         return
       end
       if data then
+        if name == "stderr" then
+          table.insert(stderr_data, data)
+        end
         vim.schedule(function()
-          -- Optional: log to a debug buffer or file
-          -- vim.notify("Pi " .. name .. ": " .. data:sub(1, 100), vim.log.levels.DEBUG)
+          -- Log to messages for debugging
+          vim.notify("Pi [" .. name .. "]: " .. data:gsub("%s+$", ""), vim.log.levels.DEBUG)
         end)
       end
     end
@@ -131,11 +143,25 @@ function M.spawn(callback)
   stdout:read_start(on_read(stdout, "stdout"))
   stderr:read_start(on_read(stderr, "stderr"))
 
-  -- Wait a moment for the server to start, then callback
+  -- Wait a moment for the server to start, then verify
   vim.defer_fn(function()
-    vim.notify("Pi: RPC server started (PID: " .. pid .. ")", vim.log.levels.INFO)
+    -- Check if process is still running
+    local running = uv.kill(pid, 0)
+    if running ~= 0 then
+      vim.schedule(function()
+        local err_msg = table.concat(stderr_data, "\n")
+        vim.notify("Pi: Process failed to start. Error: " .. err_msg, vim.log.levels.ERROR)
+      end)
+      M.pi_process = nil
+      if callback then callback(false) end
+      return
+    end
+
+    vim.schedule(function()
+      vim.notify("Pi: RPC server started (PID: " .. pid .. ")", vim.log.levels.INFO)
+    end)
     if callback then callback(true) end
-  end, 1000)
+  end, 1500)
 end
 
 -- Stop the spawned Pi process
@@ -184,7 +210,7 @@ function M.ensure_connected(opts, callback)
             M.connect(function(success)
               if callback then callback(success) end
             end)
-          end, 1500)
+          end, 2500)
         else
           if callback then callback(false) end
         end
