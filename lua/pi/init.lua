@@ -29,11 +29,12 @@ end
 
 -- Check if Pi RPC is already running by attempting connection
 function M.is_running(callback)
-  local client = M.state.get("rpc_client")
-  if not client then
-    vim.schedule(function() callback(false) end)
-    return
-  end
+  -- Create a temporary client for checking (don't mess with the main client)
+  local Client = require("pi.rpc.client")
+  local client = Client.new({
+    host = M.config.get("host"),
+    port = M.config.get("port"),
+  })
 
   -- Try to connect with short timeout
   local timer = vim.loop.new_timer()
@@ -192,10 +193,39 @@ function M.ensure_connected(opts, callback)
         if spawned then
           -- Wait a bit for server to be ready
           vim.defer_fn(function()
-            M.connect(function(success)
-              if callback then callback(success) end
-            end)
-          end, 2500)
+            -- Create a fresh client (old one might be in bad state)
+            local Client = require("pi.rpc.client")
+            local fresh_client = Client.new({
+              host = M.config.get("host"),
+              port = M.config.get("port"),
+            })
+            M.state.update("rpc_client", fresh_client)
+            
+            -- Try to connect with retry
+            local attempts = 0
+            local max_attempts = 5
+            
+            local function try_connect()
+              attempts = attempts + 1
+              M.connect(function(success, err)
+                if success then
+                  if callback then callback(true) end
+                elseif attempts < max_attempts then
+                  vim.schedule(function()
+                    vim.notify("Pi: Connection attempt " .. attempts .. " failed, retrying...", vim.log.levels.WARN)
+                  end)
+                  vim.defer_fn(try_connect, 1000)
+                else
+                  vim.schedule(function()
+                    vim.notify("Pi: Failed to connect after " .. max_attempts .. " attempts", vim.log.levels.ERROR)
+                  end)
+                  if callback then callback(false) end
+                end
+              end)
+            end
+            
+            try_connect()
+          end, 2000)
         else
           if callback then callback(false) end
         end
