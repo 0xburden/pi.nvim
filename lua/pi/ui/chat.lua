@@ -42,8 +42,7 @@ local function extract_path_from_text(text)
   if not text then
     return nil
   end
-  for line in text:gmatch("[^
-\r]+") do
+  for line in text:gmatch("[^\r\n]+") do
     local candidate = line:match("Filepath:%s*(.+)")
       or line:match("filepath:%s*(.+)")
       or line:match("File:%s*(.+)")
