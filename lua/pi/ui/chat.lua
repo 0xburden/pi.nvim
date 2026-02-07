@@ -27,6 +27,34 @@ M.session_info = {
 M.RESULT_BUF_NAME = "PiChat"
 M.INPUT_BUF_NAME = "PiChatInput"
 
+-- Get or create buffer
+local function get_or_create_buf(name, scratch)
+  -- Check if buffer already exists
+  local existing = vim.fn.bufnr(name)
+  if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) then
+    return existing
+  end
+  
+  -- Create new buffer
+  local buf = vim.api.nvim_create_buf(false, scratch or false)
+  vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+  vim.api.nvim_buf_set_option(buf, "bufhidden", "hide")
+  vim.api.nvim_buf_set_option(buf, "swapfile", false)
+  
+  -- Set name with pcall to handle race conditions
+  local ok, err = pcall(vim.api.nvim_buf_set_name, buf, name)
+  if not ok then
+    -- Name might exist from a recently closed buffer, try to find it
+    existing = vim.fn.bufnr(name)
+    if existing ~= -1 then
+      vim.api.nvim_buf_delete(existing, { force = true })
+      pcall(vim.api.nvim_buf_set_name, buf, name)
+    end
+  end
+  
+  return buf
+end
+
 -- Open chat interface
 function M.open()
   if M.is_open() then
@@ -34,24 +62,20 @@ function M.open()
   end
 
   -- Create result buffer (main chat display)
-  M.result_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_option(M.result_buf, "buftype", "nofile")
-  vim.api.nvim_buf_set_option(M.result_buf, "bufhidden", "hide")
-  vim.api.nvim_buf_set_option(M.result_buf, "swapfile", false)
+  M.result_buf = get_or_create_buf(M.RESULT_BUF_NAME, true)
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
-  vim.api.nvim_buf_set_name(M.result_buf, M.RESULT_BUF_NAME)
   vim.api.nvim_buf_set_option(M.result_buf, "wrap", true)
   vim.api.nvim_buf_set_option(M.result_buf, "linebreak", true)
 
   -- Create input buffer
-  M.input_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_option(M.input_buf, "buftype", "nofile")
-  vim.api.nvim_buf_set_option(M.input_buf, "bufhidden", "hide")
-  vim.api.nvim_buf_set_option(M.input_buf, "swapfile", false)
-  vim.api.nvim_buf_set_name(M.input_buf, M.INPUT_BUF_NAME)
+  M.input_buf = get_or_create_buf(M.INPUT_BUF_NAME, true)
 
-  -- Create windows
-  vim.cmd("botright 25vsplit")
+  -- Calculate width (40% of screen or minimum 50 columns)
+  local total_width = vim.o.columns
+  local chat_width = math.max(50, math.floor(total_width * 0.4))
+
+  -- Create main result window (right side, wider)
+  vim.cmd("botright " .. chat_width .. "vsplit")
   M.result_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(M.result_win, M.result_buf)
   vim.api.nvim_win_set_option(M.result_win, "wrap", true)
@@ -59,15 +83,19 @@ function M.open()
   vim.api.nvim_win_set_option(M.result_win, "number", false)
   vim.api.nvim_win_set_option(M.result_win, "relativenumber", false)
   vim.api.nvim_win_set_option(M.result_win, "signcolumn", "no")
+  vim.api.nvim_win_set_option(M.result_win, "foldcolumn", "0")
+  vim.api.nvim_win_set_option(M.result_win, "colorcolumn", "")
 
-  vim.cmd("split")
+  -- Create input window below (3 lines tall)
+  vim.cmd("belowright 3split")
   M.input_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(M.input_win, M.input_buf)
-  vim.api.nvim_win_set_height(M.input_win, 3)
   vim.api.nvim_win_set_option(M.input_win, "wrap", true)
   vim.api.nvim_win_set_option(M.input_win, "number", false)
   vim.api.nvim_win_set_option(M.input_win, "relativenumber", false)
   vim.api.nvim_win_set_option(M.input_win, "signcolumn", "no")
+  vim.api.nvim_win_set_option(M.input_win, "foldcolumn", "0")
+  vim.api.nvim_win_set_option(M.input_win, "colorcolumn", "")
 
   -- Set up input buffer
   M.setup_input_buffer()
@@ -241,58 +269,90 @@ function M.finalize_streaming_message()
   end
 end
 
--- Render all messages to buffer
+-- Render all messages to buffer (Pi TUI style)
 function M.render()
   if not M.result_buf or not vim.api.nvim_buf_is_valid(M.result_buf) then
     return
   end
 
   local lines = {}
+  local width = math.max(40, vim.api.nvim_win_get_width(M.result_win) - 4)
 
-  -- Header with model and token info
-  local header_parts = {}
+  -- Title bar
+  table.insert(lines, "")
+  table.insert(lines, "  ╭" .. string.rep("─", width - 4) .. "╮")
+  table.insert(lines, "  │" .. string.rep(" ", width - 4) .. "│")
+  
+  local title = "π  Pi Chat"
+  local title_padding = math.floor((width - 4 - #title) / 2)
+  table.insert(lines, "  │" .. string.rep(" ", title_padding) .. title .. string.rep(" ", width - 4 - title_padding - #title) .. "│")
+  table.insert(lines, "  │" .. string.rep(" ", width - 4) .. "│")
+  table.insert(lines, "  ╰" .. string.rep("─", width - 4) .. "╯")
+  table.insert(lines, "")
+
+  -- Status line
+  local status_parts = {}
   if M.session_info.model then
-    table.insert(header_parts, "Model: " .. M.session_info.model)
+    local model_name = M.session_info.model:match("([^/]+)$") or M.session_info.model
+    table.insert(status_parts, "model: " .. model_name)
   end
   if M.session_info.tokens.input > 0 or M.session_info.tokens.output > 0 then
-    local tokens = string.format("Tokens: %d/%d", M.session_info.tokens.input, M.session_info.tokens.output)
-    table.insert(header_parts, tokens)
+    table.insert(status_parts, string.format("%.1f%%/%.0fk", 
+      (M.session_info.tokens.input / 1000), M.session_info.tokens.output / 1000))
   end
   if M.is_streaming then
-    table.insert(header_parts, "● Working...")
+    table.insert(status_parts, "● working")
   end
 
-  if #header_parts > 0 then
-    table.insert(lines, "  " .. table.concat(header_parts, "  |  "))
-    table.insert(lines, string.rep("═", 42))
+  if #status_parts > 0 then
+    local status = "  " .. table.concat(status_parts, "  •  ")
+    table.insert(lines, status)
+    table.insert(lines, "  " .. string.rep("─", width - 2))
     table.insert(lines, "")
   end
 
-  for _, msg in ipairs(M.messages) do
-    local header
+  -- Messages
+  for i, msg in ipairs(M.messages) do
     if msg.role == "user" then
-      header = "👤 You"
-    elseif msg.role == "assistant" then
-      header = "🤖 Pi"
-    elseif msg.role == "tool" then
-      header = "🔧 Tool"
-    elseif msg.role == "system" then
-      header = "⚠️  System"
-    end
-
-    if header then
-      table.insert(lines, header)
-      table.insert(lines, string.rep("─", 40))
-
+      -- User message - right aligned style
+      table.insert(lines, "  ┌─ You")
       if msg.content and msg.content ~= "" then
         for _, line in ipairs(vim.split(msg.content, "\n")) do
-          table.insert(lines, line)
+          table.insert(lines, "  │ " .. line)
         end
       end
-
-      table.insert(lines, "")
+      table.insert(lines, "  └")
+      
+    elseif msg.role == "assistant" then
+      -- Pi message
+      if msg.streaming then
+        table.insert(lines, "  ┌─ Pi " .. "⠋ thinking...")
+      else
+        table.insert(lines, "  ┌─ Pi")
+      end
+      if msg.content and msg.content ~= "" then
+        for _, line in ipairs(vim.split(msg.content, "\n")) do
+          table.insert(lines, "  │ " .. line)
+        end
+      end
+      table.insert(lines, "  └")
+      
+    elseif msg.role == "tool" then
+      -- Tool call - dim
+      table.insert(lines, "  ○ " .. msg.content)
+      
+    elseif msg.role == "system" then
+      -- System/error message
+      table.insert(lines, "  ⚠ " .. msg.content)
     end
+    
+    table.insert(lines, "")
   end
+
+  -- Footer
+  table.insert(lines, "")
+  table.insert(lines, "  " .. string.rep("─", width - 2))
+  table.insert(lines, "  Press q to close • Enter to send • Shift+Enter for new line")
 
   -- Update buffer
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", true)
@@ -303,7 +363,9 @@ function M.render()
   if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
     local line_count = vim.api.nvim_buf_line_count(M.result_buf)
     if line_count > 0 then
-      vim.api.nvim_win_set_cursor(M.result_win, { line_count, 0 })
+      -- Scroll to near bottom but show some context
+      local scroll_to = math.max(1, line_count - 3)
+      vim.api.nvim_win_set_cursor(M.result_win, { scroll_to, 0 })
     end
   end
 end
@@ -406,6 +468,14 @@ function M.close()
   end
   if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
     vim.api.nvim_win_close(M.result_win, true)
+  end
+
+  -- Wipe buffers to free the names
+  if M.input_buf and vim.api.nvim_buf_is_valid(M.input_buf) then
+    vim.api.nvim_buf_delete(M.input_buf, { force = true })
+  end
+  if M.result_buf and vim.api.nvim_buf_is_valid(M.result_buf) then
+    vim.api.nvim_buf_delete(M.result_buf, { force = true })
   end
 
   M.input_win = nil
