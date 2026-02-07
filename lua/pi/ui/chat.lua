@@ -166,6 +166,8 @@ local function register_tool_call_context(tool)
   M.tool_call_context[id] = entry
 end
 
+local try_open_file
+
 local function flush_pending_file_paths()
   if not next(M.pending_file_paths) then
     return
@@ -198,7 +200,7 @@ local function choose_target_window()
   return nil
 end
 
-local function try_open_file(path)
+try_open_file = function(path)
   if not path then
     return
   end
