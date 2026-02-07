@@ -23,7 +23,7 @@ function M:connect(callback)
     return
   end
 
-  local cmd = { "pi", "--mode", "rpc" }
+  local cmd = { "pi", "--mode", "rpc", "--no-session" }
   if self.port then
     table.insert(cmd, "--rpc-port")
     table.insert(cmd, tostring(self.port))
