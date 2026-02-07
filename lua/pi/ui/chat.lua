@@ -67,8 +67,7 @@ M.session_info = {
   tokens = { input = 0, output = 0 },
 }
 
--- Track edited files
-M.edited_files = {}
+-- Pending file paths to open after edits
 M.pending_file_paths = {}
 
 -- Constants
@@ -127,14 +126,10 @@ local function try_open_file(path)
   if not path then
     return
   end
-  if M.edited_files[path] then
-    return
-  end
   if vim.fn.filereadable(path) == 0 then
     vim.notify("Pi: File not readable: " .. path, vim.log.levels.WARN)
     return
   end
-  M.edited_files[path] = true
   M.open_file_in_other_window(path)
 end
 -- Get or create buffer
@@ -380,7 +375,7 @@ function M.open_file_in_other_window(filepath)
   end
 
   vim.api.nvim_set_current_win(target_win)
-  vim.cmd("edit " .. vim.fn.fnameescape(filepath))
+  vim.cmd("silent! edit! " .. vim.fn.fnameescape(filepath))
 
   -- Return to chat
   vim.defer_fn(function()
@@ -407,7 +402,7 @@ function M.append_to_stream(text)
     if M.messages[i].role == "assistant" and M.messages[i].streaming then
       local full_content = M.current_response
       if M.current_thinking ~= "" then
-        full_content = "💭 Thinking:\n" .. M.current_thinking .. "\n\n" .. M.current_response
+        full_content = "💭 " .. M.current_thinking .. "\n\n" .. M.current_response
       end
       M.messages[i].content = full_content
       break
@@ -422,7 +417,7 @@ function M.append_to_thinking(text)
     if M.messages[i].role == "assistant" and M.messages[i].streaming then
       local full_content = M.current_response
       if M.current_thinking ~= "" then
-        full_content = "💭 Thinking:\n" .. M.current_thinking .. "\n\n" .. M.current_response
+        full_content = "💭 " .. M.current_thinking .. "\n\n" .. M.current_response
       end
       M.messages[i].content = full_content
       break
@@ -565,7 +560,6 @@ function M.send_message(text)
     return
   end
 
-  M.edited_files = {}
   M.pending_file_paths = {}
   M.add_message("user", text, false)
   M.is_streaming = true
