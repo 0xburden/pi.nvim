@@ -612,6 +612,7 @@ function M.render()
 
   local lines = {}
   local highlights = {}
+  local width = math.max(40, (M.result_win and vim.api.nvim_win_is_valid(M.result_win)) and vim.api.nvim_win_get_width(M.result_win) - 4 or 40)
   local function add_line(text, hl)
     table.insert(lines, text)
     if hl then
@@ -641,7 +642,12 @@ function M.render()
       if line_highlighter then
         applied = line_highlighter(line) or applied
       end
-      add_line("  " .. line, applied)
+      local line_text = "  " .. line
+      if hl == USER_PROMPT_HL then
+        local pad = math.max(0, width - #line_text)
+        line_text = line_text .. string.rep(" ", pad)
+      end
+      add_line(line_text, applied)
     end
   end
 
@@ -654,8 +660,6 @@ function M.render()
     end
     return nil
   end
-
-  local width = math.max(40, (M.result_win and vim.api.nvim_win_is_valid(M.result_win)) and vim.api.nvim_win_get_width(M.result_win) - 4 or 40)
 
   -- Status line
   local status_parts = {}
