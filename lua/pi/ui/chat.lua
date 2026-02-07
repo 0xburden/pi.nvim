@@ -92,6 +92,13 @@ function M.open()
   vim.fn.prompt_setcallback(M.input_buf, function(text)
     if text ~= "" then
       M.send_message(text)
+      -- Clear the prompt after sending
+      vim.schedule(function()
+        if M.input_buf and vim.api.nvim_buf_is_valid(M.input_buf) then
+          vim.api.nvim_buf_set_lines(M.input_buf, 0, -1, false, {})
+          vim.api.nvim_buf_set_option(M.input_buf, "modified", false)
+        end
+      end)
     end
   end)
   
@@ -100,15 +107,11 @@ function M.open()
   vim.api.nvim_buf_set_keymap(M.buf, "n", "q", ":PiChat<CR>", { noremap = true, silent = true })
   vim.api.nvim_buf_set_keymap(M.status_buf, "n", "q", ":PiChat<CR>", { noremap = true, silent = true })
   
-  -- Auto-close on buffer leave for prompt
-  vim.api.nvim_create_autocmd("BufLeave", {
+  -- Prevent modified state issues
+  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
     buffer = M.input_buf,
     callback = function()
-      vim.schedule(function()
-        if M.is_open() and vim.fn.getbufvar(M.input_buf, "&modified") == 1 then
-          vim.api.nvim_buf_set_option(M.input_buf, "modified", false)
-        end
-      end)
+      vim.api.nvim_buf_set_option(M.input_buf, "modified", false)
     end,
   })
   

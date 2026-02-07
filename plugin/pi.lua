@@ -100,6 +100,28 @@ vim.api.nvim_create_user_command("PiSession", function()
   end)
 end, { desc = "Show current session info" })
 
+-- Debug command
+vim.api.nvim_create_user_command("PiDebug", function()
+  local events = require("pi.events")
+  local state = require("pi.state")
+  
+  print("=== Pi Debug Info ===")
+  print("Connected: " .. tostring(state.get("connected")))
+  print("Client: " .. (state.get("rpc_client") and "yes" or "no"))
+  print("Chat open: " .. tostring(state.get("ui.chat_open")))
+  
+  -- Subscribe to all events for 10 seconds
+  print("\nListening to events for 10 seconds...")
+  local unsub = events.on("rpc_event", function(evt)
+    print("Event: " .. vim.inspect(evt):sub(1, 200))
+  end)
+  
+  vim.defer_fn(function()
+    unsub()
+    print("\nDebug session ended")
+  end, 10000)
+end, { desc = "Debug Pi events (10s capture)" })
+
 vim.api.nvim_create_user_command("PiSessionNew", function(opts)
   local client = require("pi.state").get("rpc_client")
   local session = require("pi.rpc.session")
