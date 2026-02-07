@@ -39,7 +39,7 @@ local function normalize_path(path)
 end
 
 local function extract_path_from_text(text)
-  if not text then
+  if type(text) ~= "string" then
     return nil
   end
   for line in text:gmatch("[^\r\n]+") do
@@ -94,8 +94,10 @@ local function detect_file_paths(event)
       if path then push(path) end
     end
     local delta = event.assistantMessageEvent.delta
-    local text_path = extract_path_from_text(delta)
-    if text_path then push(text_path) end
+    if type(delta) == "string" then
+      local text_path = extract_path_from_text(delta)
+      if text_path then push(text_path) end
+    end
   end
   if event.result then
     local text_path = extract_path_from_text(event.result)
