@@ -23,6 +23,9 @@ M.session_info = {
   tokens = { input = 0, output = 0 },
 }
 
+-- Track edited files
+M.edited_files = {}
+
 -- Constants
 M.RESULT_BUF_NAME = "PiChat"
 M.INPUT_BUF_NAME = "PiChatInput"
@@ -85,6 +88,9 @@ function M.open()
   vim.api.nvim_win_set_option(M.result_win, "signcolumn", "no")
   vim.api.nvim_win_set_option(M.result_win, "foldcolumn", "0")
   vim.api.nvim_win_set_option(M.result_win, "colorcolumn", "")
+  -- Set subtle background color for contrast
+  vim.api.nvim_win_set_option(M.result_win, "winhighlight",
+    "Normal:PiChatNormal,EndOfBuffer:PiChatNormal")
 
   -- Create input window below (3 lines tall)
   vim.cmd("belowright 3split")
@@ -96,6 +102,9 @@ function M.open()
   vim.api.nvim_win_set_option(M.input_win, "signcolumn", "no")
   vim.api.nvim_win_set_option(M.input_win, "foldcolumn", "0")
   vim.api.nvim_win_set_option(M.input_win, "colorcolumn", "")
+  -- Slightly different background for input area
+  vim.api.nvim_win_set_option(M.input_win, "winhighlight",
+    "Normal:PiChatInput,EndOfBuffer:PiChatInput")
 
   -- Set up input buffer
   M.setup_input_buffer()
@@ -225,6 +234,66 @@ function M.handle_event(event)
   elseif event.type == "error" then
     M.is_streaming = false
     M.add_message("system", "Error: " .. (event.error or "Unknown error"), false)
+
+  elseif event.type == "file_edit" or event.type == "tool_result" then
+    -- Track and open edited files
+    local filepath = nil
+    if event.filepath then
+      filepath = event.filepath
+    elseif event.toolCall and event.toolCall.name == "edit" then
+      filepath = event.toolCall.arguments and event.toolCall.arguments.file
+    end
+
+    if filepath and not M.edited_files[filepath] then
+      M.edited_files[filepath] = true
+      M.open_file_in_other_window(filepath)
+    end
+  end
+end
+
+-- Open a file in the window to the left of chat
+function M.open_file_in_other_window(filepath)
+  -- Only open if file exists
+  if vim.fn.filereadable(filepath) == 0 then
+    return
+  end
+
+  -- Find the leftmost window that's not our chat windows
+  local current_tab = vim.api.nvim_get_current_tabpage()
+  local wins = vim.api.nvim_tabpage_list_wins(current_tab)
+
+  -- Get our chat window IDs
+  local chat_wins = {}
+  if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
+    chat_wins[M.result_win] = true
+  end
+  if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
+    chat_wins[M.input_win] = true
+  end
+
+  -- Find a non-chat window
+  local target_win = nil
+  for _, win in ipairs(wins) do
+    if not chat_wins[win] then
+      target_win = win
+      break
+    end
+  end
+
+  -- If no other window exists, create one
+  if not target_win then
+    vim.cmd("topleft vsplit")
+    target_win = vim.api.nvim_get_current_win()
+  end
+
+  -- Open the file in the target window
+  vim.api.nvim_set_current_win(target_win)
+  vim.cmd("edit " .. vim.fn.fnameescape(filepath))
+
+  -- Return focus to input window
+  if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
+    vim.api.nvim_set_current_win(M.input_win)
+    vim.cmd("startinsert!")
   end
 end
 
@@ -377,6 +446,9 @@ function M.send_message(text)
     vim.notify("Pi: Not connected", vim.log.levels.ERROR)
     return
   end
+
+  -- Clear edited files tracking for new session
+  M.edited_files = {}
 
   -- Add user message immediately
   M.add_message("user", text, false)

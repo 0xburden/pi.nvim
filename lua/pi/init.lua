@@ -7,6 +7,10 @@ M.config = require("pi.config")
 function M.setup(opts)
   M.config.setup(opts or {})
 
+  -- Set up highlight groups for chat UI
+  vim.api.nvim_set_hl(0, "PiChatNormal", { bg = "#1a1a2e" })
+  vim.api.nvim_set_hl(0, "PiChatInput", { bg = "#16213e" })
+
   local Client = require("pi.rpc.client")
   local client = Client.new({
     host = M.config.get("host"),
