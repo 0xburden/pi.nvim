@@ -54,32 +54,36 @@ function M.approve()
   local filepath = M.current_file.path
   local content = M.current_file.content
   
-  -- Apply the change
-  local client = state.get("rpc_client")
-  local files_rpc = require("pi.rpc.files")
-  
-  files_rpc.write(client, filepath, content, function(result)
-    if result.error then
-      vim.notify("Failed to apply change: " .. result.error, vim.log.levels.ERROR)
-      return
+  -- Write content to file directly
+  local ok, err = pcall(function()
+    local file = io.open(filepath, "w")
+    if not file then
+      error("Failed to open file: " .. filepath)
     end
-    
-    -- Mark as modified
-    local modified = state.get("files.modified")
-    table.insert(modified, filepath)
-    state.update("files.modified", modified)
-    
-    -- Remove from pending
-    local pending = state.get("files.pending")
-    pending[filepath] = nil
-    state.update("files.pending", pending)
-    
-    vim.notify("Change approved and applied!", vim.log.levels.INFO)
-    
-    -- Close diff and review next
-    diff_viewer.close()
-    M.review_next()
+    file:write(content)
+    file:close()
   end)
+  
+  if not ok then
+    vim.notify("Failed to apply change: " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  
+  -- Mark as modified
+  local modified = state.get("files.modified")
+  table.insert(modified, filepath)
+  state.update("files.modified", modified)
+  
+  -- Remove from pending
+  local pending = state.get("files.pending")
+  pending[filepath] = nil
+  state.update("files.pending", pending)
+  
+  vim.notify("Change approved and applied!", vim.log.levels.INFO)
+  
+  -- Close diff and review next
+  diff_viewer.close()
+  M.review_next()
 end
 
 -- Reject current change

@@ -1,5 +1,4 @@
 local state = require("pi.state")
-local conversation = require("pi.rpc.conversation")
 
 local M = {}
 M.buf = nil
@@ -81,14 +80,17 @@ end
 -- Load conversation history
 function M.load_history()
   local client = state.get("rpc_client")
+  if not client then return end
   
-  conversation.history(client, function(result)
-    if result.error then
-      vim.notify("Failed to load history: " .. result.error, vim.log.levels.ERROR)
-      return
-    end
-    
-    M.render_history(result.messages or {})
+  client:request("get_messages", { type = "get_messages" }, function(result)
+    vim.schedule(function()
+      if result.error then
+        vim.notify("Failed to load history: " .. result.error, vim.log.levels.ERROR)
+        return
+      end
+      
+      M.render_history(result.data and result.data.messages or {})
+    end)
   end)
 end
 
@@ -119,20 +121,23 @@ end
 -- Send message
 function M.send_message(text)
   local client = state.get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
   
   -- Add user message to display
   M.append_message("You", text)
   
-  conversation.send(client, text, function(result)
-    if result.error then
-      vim.notify("Failed to send message: " .. result.error, vim.log.levels.ERROR)
-      return
-    end
-    
-    -- Add Pi's response
-    if result.response then
-      M.append_message("Pi", result.response)
-    end
+  client:request("prompt", { type = "prompt", message = text }, function(result)
+    vim.schedule(function()
+      if result.error then
+        vim.notify("Failed to send message: " .. result.error, vim.log.levels.ERROR)
+        return
+      end
+      
+      vim.notify("Pi: Message sent", vim.log.levels.INFO)
+    end)
   end)
 end
 
