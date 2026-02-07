@@ -235,13 +235,27 @@ function M.handle_event(event)
     M.is_streaming = false
     M.add_message("system", "Error: " .. (event.error or "Unknown error"), false)
 
-  elseif event.type == "file_edit" or event.type == "tool_result" then
+  elseif event.type == "tool_use" or event.type == "tool_result" then
     -- Track and open edited files
     local filepath = nil
-    if event.filepath then
-      filepath = event.filepath
-    elseif event.toolCall and event.toolCall.name == "edit" then
-      filepath = event.toolCall.arguments and event.toolCall.arguments.file
+    local tool_name = nil
+    
+    -- Try different event structures
+    if event.tool and event.tool.name then
+      tool_name = event.tool.name
+      if tool_name == "edit" or tool_name == "write" then
+        filepath = event.tool.arguments and (event.tool.arguments.file or event.tool.arguments.path)
+      end
+    elseif event.toolCall then
+      tool_name = event.toolCall.name or event.toolCall.tool
+      if tool_name == "edit" or tool_name == "write" then
+        filepath = event.toolCall.arguments and (event.toolCall.arguments.file or event.toolCall.arguments.path)
+      end
+    elseif event.tool_name then
+      tool_name = event.tool_name
+      if tool_name == "edit" or tool_name == "write" then
+        filepath = event.arguments and (event.arguments.file or event.arguments.path)
+      end
     end
 
     if filepath and not M.edited_files[filepath] then
