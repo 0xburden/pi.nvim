@@ -82,86 +82,6 @@ local function normalize_path(path)
   return vim.fn.fnamemodify(path, ":p")
 end
 
-local function extract_path_from_text(text)
-  if type(text) ~= "string" then
-    return nil
-  end
-  for line in text:gmatch("[^\r\n]+") do
-    local candidate = line:match("Filepath:%s*(.+)")
-      or line:match("filepath:%s*(.+)")
-      or line:match("File:%s*(.+)")
-      or line:match("file:%s*(.+)")
-    if candidate then
-      return normalize_path(candidate)
-    end
-  end
-  return nil
-end
-
-local function extract_path_from_tool(tool)
-  if not tool then
-    return nil
-  end
-  local args = tool.arguments or tool.args or {}
-  local direct = args.file or args.path or args.filepath
-  if direct then
-    return normalize_path(direct)
-  end
-  return nil
-end
-
-local function detect_file_paths(event)
-  local paths = {}
-  local function push(path)
-    local normalized = normalize_path(path)
-    if normalized then
-      paths[normalized] = true
-    end
-  end
-
-  if event.tool then
-    local path = extract_path_from_tool(event.tool)
-    if path then push(path) end
-  end
-  if event.toolCall then
-    local path = extract_path_from_tool(event.toolCall)
-    if path then push(path) end
-  end
-  if event.tool_name and event.arguments then
-    local path = extract_path_from_tool({arguments = event.arguments})
-    if path then push(path) end
-  end
-  if event.assistantMessageEvent then
-    local tool = event.assistantMessageEvent.toolCall or event.assistantMessageEvent.tool
-    if tool then
-      local path = extract_path_from_tool(tool)
-      if path then push(path) end
-    end
-    local delta = event.assistantMessageEvent.delta
-    if type(delta) == "string" then
-      local text_path = extract_path_from_text(delta)
-      if text_path then push(text_path) end
-    end
-  end
-  if event.result then
-    local text_path = extract_path_from_text(event.result)
-    if text_path then push(text_path) end
-  end
-  if event.output then
-    local text_path = extract_path_from_text(event.output)
-    if text_path then push(text_path) end
-  end
-  if event.content and type(event.content) == "string" then
-    local text_path = extract_path_from_text(event.content)
-    if text_path then push(text_path) end
-  end
-
-  local unique = {}
-  for path in pairs(paths) do
-    table.insert(unique, path)
-  end
-  return unique
-end
 
 local function queue_file_path(path)
   local normalized = normalize_path(path)
@@ -169,13 +89,6 @@ local function queue_file_path(path)
     return
   end
   M.pending_file_paths[normalized] = true
-end
-
-local function queue_event_paths(event)
-  local paths = detect_file_paths(event)
-  for _, path in ipairs(paths) do
-    queue_file_path(path)
-  end
 end
 
 local function flush_pending_file_paths()
@@ -367,6 +280,7 @@ function M.handle_event(event)
     M.finalize_streaming_message()
     M.current_response = ""
     M.current_thinking = ""
+    M.pending_file_paths = {}
 
   elseif event_type == "message_update" then
     local delta = event.assistantMessageEvent
@@ -440,16 +354,14 @@ function M.handle_event(event)
       M.add_message("tool_result", "[" .. tool_name .. " result]:\n" .. content, false)
     end
 
+    flush_pending_file_paths()
+
   elseif event_type == "error" then
     M.is_streaming = false
     M.add_message("system", "Error: " .. (event.error or "Unknown error"), false)
+    M.pending_file_paths = {}
   end
 
-  queue_event_paths(event)
-  if event_type == "tool_result" then
-    flush_pending_file_paths()
-  end
-  
   -- Always re-render after handling an event
   M.render()
 end
@@ -664,6 +576,7 @@ function M.send_message(text)
   end
 
   M.edited_files = {}
+  M.pending_file_paths = {}
   M.add_message("user", text, false)
   M.is_streaming = true
   M.current_response = ""
