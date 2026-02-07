@@ -113,14 +113,17 @@ function M:request(method, params, callback)
 end
 
 function M:_handle_line(line)
+  -- Log raw line for debugging
+  vim.notify("Pi RAW: " .. line:sub(1, 150), vim.log.levels.DEBUG)
+  
   local ok, message = pcall(vim.json.decode, line)
   if not ok then
     vim.notify("Pi: Failed to parse JSON: " .. line:sub(1, 100), vim.log.levels.ERROR)
     return
   end
 
-  -- Debug: log all messages (can be removed later)
-  -- vim.notify("Pi RPC: " .. vim.inspect(message):sub(1, 100), vim.log.levels.DEBUG)
+  -- Debug: log parsed message
+  vim.notify("Pi RPC: type=" .. tostring(message.type) .. " id=" .. tostring(message.id), vim.log.levels.DEBUG)
 
   if message.type == "response" and message.id then
     local callback = self.pending[message.id]
