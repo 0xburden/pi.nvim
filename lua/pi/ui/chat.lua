@@ -203,6 +203,9 @@ end
 
 -- Handle incoming events
 function M.handle_event(event)
+  -- Debug: log all events to see what Pi sends
+  vim.notify("Pi event: " .. tostring(event.type) .. " | " .. vim.inspect(event):sub(1, 100), vim.log.levels.DEBUG)
+
   if event.type == "agent_start" then
     M.is_streaming = true
     M.current_response = ""
@@ -235,10 +238,13 @@ function M.handle_event(event)
     M.is_streaming = false
     M.add_message("system", "Error: " .. (event.error or "Unknown error"), false)
 
-  elseif event.type == "tool_use" or event.type == "tool_result" then
+  elseif event.type == "tool_use" or event.type == "tool_result" or event.type == "tool_call" then
     -- Track and open edited files
     local filepath = nil
     local tool_name = nil
+    
+    -- Debug the event structure
+    vim.notify("Tool event: " .. vim.inspect(event), vim.log.levels.INFO)
     
     -- Try different event structures
     if event.tool and event.tool.name then
@@ -256,11 +262,20 @@ function M.handle_event(event)
       if tool_name == "edit" or tool_name == "write" then
         filepath = event.arguments and (event.arguments.file or event.arguments.path)
       end
+    elseif event.name then
+      -- Another possible structure
+      tool_name = event.name
+      if tool_name == "edit" or tool_name == "write" then
+        filepath = event.args and (event.args.file or event.args.path)
+      end
     end
 
-    if filepath and not M.edited_files[filepath] then
-      M.edited_files[filepath] = true
-      M.open_file_in_other_window(filepath)
+    if filepath then
+      vim.notify("Detected file edit: " .. filepath, vim.log.levels.INFO)
+      if not M.edited_files[filepath] then
+        M.edited_files[filepath] = true
+        M.open_file_in_other_window(filepath)
+      end
     end
   end
 end

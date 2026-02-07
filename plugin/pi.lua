@@ -122,6 +122,13 @@ vim.api.nvim_create_user_command("PiDebug", function()
   end, 10000)
 end, { desc = "Debug Pi events (10s capture)" })
 
+-- Test file opening
+vim.api.nvim_create_user_command("PiTestOpen", function(opts)
+  local chat = require("pi.ui.chat")
+  local filepath = opts.args ~= "" and opts.args or vim.fn.expand("%:p")
+  chat.open_file_in_other_window(filepath)
+end, { nargs = "?", complete = "file", desc = "Test opening file in other window" })
+
 vim.api.nvim_create_user_command("PiSessionNew", function(opts)
   local client = require("pi.state").get("rpc_client")
   local session = require("pi.rpc.session")

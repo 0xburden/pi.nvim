@@ -7,9 +7,18 @@ M.config = require("pi.config")
 function M.setup(opts)
   M.config.setup(opts or {})
 
-  -- Set up monochromatic highlight groups for chat UI
-  vim.api.nvim_set_hl(0, "PiChatNormal", { bg = "#252525" })
-  vim.api.nvim_set_hl(0, "PiChatInput", { bg = "#1a1a1a" })
+  -- Set up highlight groups using colorscheme colors
+  -- Use NormalFloat/Pmenu backgrounds if available, fallback to subtle gray
+  local normal_bg = vim.api.nvim_get_hl(0, { name = "Normal" }).bg
+  local float_bg = vim.api.nvim_get_hl(0, { name = "NormalFloat" }).bg
+  local pmenu_bg = vim.api.nvim_get_hl(0, { name = "Pmenu" }).bg
+  
+  -- Fallback values if highlights not defined
+  local chat_bg = float_bg or pmenu_bg or (normal_bg and normal_bg - 0x101010) or 0x252525
+  local input_bg = normal_bg or 0x1a1a1a
+  
+  vim.api.nvim_set_hl(0, "PiChatNormal", { bg = chat_bg })
+  vim.api.nvim_set_hl(0, "PiChatInput", { bg = input_bg })
 
   local Client = require("pi.rpc.client")
   local client = Client.new({
