@@ -87,6 +87,7 @@ M.current_response = ""
 M.current_thinking = ""
 M.is_streaming = false
 M.messages = {}
+M.agent_cwd = vim.fn.getcwd()
 
 -- Session info
 M.session_info = {
@@ -102,9 +103,15 @@ M.tool_call_context = {}
 M.RESULT_BUF_NAME = "PiChat"
 M.INPUT_BUF_NAME = "PiChatInput"
 
-local function normalize_path(path)
+local function normalize_path(path, base)
   if not path or path == "" then
     return nil
+  end
+  if vim.startswith(path, "/") then
+    return vim.fn.fnamemodify(path, ":p")
+  end
+  if base and base ~= "" then
+    return vim.fn.fnamemodify(base .. "/" .. path, ":p")
   end
   return vim.fn.fnamemodify(path, ":p")
 end
@@ -126,7 +133,7 @@ local function extract_path_from_text(text)
 end
 
 local function queue_file_path(path)
-  local normalized = normalize_path(path)
+  local normalized = normalize_path(path, M.agent_cwd)
   if not normalized then
     return
   end
@@ -150,7 +157,7 @@ local function register_tool_call_context(tool)
   local args = tool.arguments or tool.args or {}
   local direct = args.file or args.path or args.filepath
   if direct then
-    entry.filepath = normalize_path(direct)
+    entry.raw_path = direct
   end
   M.tool_call_context[id] = entry
 end
@@ -421,8 +428,11 @@ function M.handle_event(event)
     local tool_id = event.message.toolCallId
     if tool_id then
       local context = M.tool_call_context[tool_id]
-      if context and context.filepath then
-        queue_file_path(context.filepath)
+      if context then
+        local resolved = context.filepath or context.raw_path
+        if resolved then
+          queue_file_path(resolved)
+        end
       end
       M.tool_call_context[tool_id] = nil
     end
@@ -437,6 +447,13 @@ function M.handle_event(event)
       end
     end
     local result_text = table.concat(tool_message_parts, "")
+
+    if tool_name == "bash" then
+      local cwd_guess = vim.trim(result_text)
+      if cwd_guess ~= "" then
+        M.agent_cwd = cwd_guess
+      end
+    end
 
     if event.message.details and event.message.details.diff then
       queue_text_path(event.message.details.diff)
