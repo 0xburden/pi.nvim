@@ -8,6 +8,7 @@ M.result_buf = nil
 M.result_win = nil
 M.input_buf = nil
 M.input_win = nil
+M.origin_win = nil
 
 -- Event subscription
 M.event_unsub = nil
@@ -119,6 +120,22 @@ local function detect_file_paths(event)
   return unique
 end
 
+local function is_valid_target_window(win)
+  return win and vim.api.nvim_win_is_valid(win) and win ~= M.result_win and win ~= M.input_win
+end
+
+local function choose_target_window()
+  if is_valid_target_window(M.origin_win) then
+    return M.origin_win
+  end
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if is_valid_target_window(win) then
+      return win
+    end
+  end
+  return nil
+end
+
 local function try_open_file(path)
   if not path then
     return
@@ -163,6 +180,8 @@ function M.open()
     return
   end
 
+  local origin_win = vim.api.nvim_get_current_win()
+
   M.result_buf = get_or_create_buf(M.RESULT_BUF_NAME, true)
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
   vim.api.nvim_buf_set_option(M.result_buf, "wrap", true)
@@ -202,6 +221,7 @@ function M.open()
   vim.api.nvim_set_current_win(M.input_win)
   vim.cmd("startinsert!")
 
+  M.origin_win = origin_win
   state.update("ui.chat_open", true)
 end
 
@@ -373,19 +393,13 @@ function M.open_file_in_other_window(filepath)
     return
   end
 
-  -- Focus the leftmost code window
-  vim.cmd("normal! \\<C-w>h")
-
-  -- Check if this is a chat window
-  local current_win = vim.api.nvim_get_current_win()
-  if current_win == M.result_win or current_win == M.input_win then
-    vim.cmd("normal! \\<C-w>l")
-    vim.cmd("normal! \\<C-w>h")
-    current_win = vim.api.nvim_get_current_win()
+  local target_win = choose_target_window()
+  if not target_win then
+    vim.cmd("topleft vsplit")
+    target_win = vim.api.nvim_get_current_win()
   end
 
-  -- Open the file
-  vim.api.nvim_set_current_win(current_win)
+  vim.api.nvim_set_current_win(target_win)
   vim.cmd("edit " .. vim.fn.fnameescape(filepath))
 
   -- Return to chat
@@ -650,6 +664,7 @@ function M.close()
   M.result_win = nil
   M.input_buf = nil
   M.result_buf = nil
+  M.origin_win = nil
 
   state.update("ui.chat_open", false)
 end
