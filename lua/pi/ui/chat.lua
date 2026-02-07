@@ -398,12 +398,28 @@ function M.handle_event(event)
       M.add_message("tool_result", "[" .. tool_name .. " result]:\n" .. content, false)
     end
 
-    flush_pending_file_paths()
+  end
 
-  elseif event_type == "error" then
-    M.is_streaming = false
-    M.add_message("system", "Error: " .. (event.error or "Unknown error"), false)
-    M.pending_file_paths = {}
+  if event.message and event.message.role == "toolResult" then
+    local tool_name = event.message.toolName or event.message.tool or "tool"
+    local tool_message_parts = {}
+    for _, chunk in ipairs(event.message.content or {}) do
+      if type(chunk) == "table" and chunk.text then
+        table.insert(tool_message_parts, chunk.text)
+      elseif type(chunk) == "string" then
+        table.insert(tool_message_parts, chunk)
+      end
+    end
+    local result_text = table.concat(tool_message_parts, "")
+
+    if event.message.details and event.message.details.diff then
+      queue_text_path(event.message.details.diff)
+      result_text = result_text .. "\n\nDiff:\n" .. event.message.details.diff
+    end
+
+    local display = "[" .. tool_name .. " result]:\n" .. (result_text ~= "" and result_text or "(no output)")
+    M.add_message("tool_result", display, false)
+    flush_pending_file_paths()
   end
 
   -- Always re-render after handling an event
