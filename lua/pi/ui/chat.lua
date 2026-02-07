@@ -6,6 +6,7 @@ local M = {}
 local HIGHLIGHT_NS = vim.api.nvim_create_namespace("pi_chat_highlights")
 local THINKING_HL = "PiChatThinking"
 local USER_PROMPT_HL = "PiChatUserPrompt"
+local TOOL_RESULT_HL = "PiChatToolResult"
 local DIFF_ADD_HL = "PiChatDiffAdd"
 local DIFF_DEL_HL = "PiChatDiffDel"
 
@@ -57,6 +58,16 @@ local function setup_highlights()
   end
   copy_highlight(diff_add_hl, DIFF_ADD_HL)
   copy_highlight(diff_del_hl, DIFF_DEL_HL)
+
+  local thinking_color = safe_get_highlight("Comment")
+  if thinking_color.foreground or thinking_color.background then
+    local tool_opts = {}
+    if thinking_color.foreground then tool_opts.fg = thinking_color.foreground end
+    if thinking_color.background then tool_opts.bg = thinking_color.background end
+    vim.api.nvim_set_hl(0, TOOL_RESULT_HL, tool_opts)
+  else
+    vim.api.nvim_set_hl(0, TOOL_RESULT_HL, { fg = thinking_color.foreground, bg = thinking_color.background })
+  end
 end
 
 setup_highlights()
@@ -327,7 +338,8 @@ function M.handle_event(event)
     elseif delta_type == "thinking_delta" and delta.delta then
       M.append_to_thinking(delta.delta)
       
-    elseif delta_type == "tool_call" or delta_type == "tool_use" then
+    elseif delta_type == "tool_call" or delta_type == "tool_use" 
+      or delta_type == "toolcall_start" or delta_type == "toolcall_delta" or delta_type == "toolcall_end" then
       local tool = delta.toolCall or delta.tool or {}
       M.add_tool_call(tool)
       
@@ -401,7 +413,7 @@ function M.handle_event(event)
       result_text = result_text .. "\n\nDiff:\n" .. event.message.details.diff
     end
 
-    local display = "[" .. tool_name .. " result]:\n" .. (result_text ~= "" and result_text or "(no output)")
+    local display = result_text ~= "" and result_text or "(no output)"
     M.add_message("tool_result", display, false)
     flush_pending_file_paths()
   end
@@ -599,7 +611,7 @@ function M.render()
       add_message_lines(msg.content)
 
     elseif msg.role == "tool_result" then
-      add_message_lines(msg.content, nil, diff_line_highlight)
+      add_message_lines(msg.content, TOOL_RESULT_HL, diff_line_highlight)
 
     elseif msg.role == "system" then
       add_line("  ⚠️  " .. msg.content)
