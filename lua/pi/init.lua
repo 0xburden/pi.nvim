@@ -28,126 +28,20 @@ function M.setup(opts)
 end
 
 -- Check if Pi RPC is already running by attempting connection
+-- NOTE: Returns false since Pi doesn't have RPC server mode in v0.52.7
 function M.is_running(callback)
-  -- Create a temporary client for checking (don't mess with the main client)
-  local Client = require("pi.rpc.client")
-  local client = Client.new({
-    host = M.config.get("host"),
-    port = M.config.get("port"),
-  })
-
-  -- Try to connect with short timeout
-  local timer = vim.loop.new_timer()
-  local connected = false
-  local callback_called = false
-
-  local function safe_callback(result)
-    if not callback_called then
-      callback_called = true
-      vim.schedule(function() callback(result) end)
-    end
-  end
-
-  client:connect(function(success, err)
-    connected = success
-    if success then
-      -- Disconnect immediately, we were just checking
-      client:disconnect()
-    end
-    if timer then
-      timer:stop()
-      timer:close()
-    end
-    safe_callback(success)
-  end)
-
-  -- Timeout after 500ms
-  timer:start(500, 0, function()
-    if not connected then
-      client:disconnect()
-      timer:close()
-      safe_callback(false)
-    end
-  end)
+  vim.schedule(function() callback(false) end)
 end
 
--- Spawn Pi with RPC enabled
+-- NOTE: Pi RPC server mode is not available in current version (0.52.7)
+-- This function is kept for when/if RPC support is added to Pi
 function M.spawn(callback)
-  if M.pi_process then
-    vim.schedule(function()
-      vim.notify("Pi: Process already spawned (PID: " .. M.pi_process.pid .. ")", vim.log.levels.WARN)
-    end)
-    if callback then vim.schedule(function() callback(true) end) end
-    return
-  end
-
-  local uv = vim.loop
-  local port = M.config.get("port") or 43863
-
   vim.schedule(function()
-    vim.notify("Pi: Starting RPC server on port " .. port .. "...", vim.log.levels.INFO)
+    vim.notify("Pi: RPC server mode is not available in Pi v0.52.7", vim.log.levels.ERROR)
+    vim.notify("Pi: Please start Pi manually in a separate terminal", vim.log.levels.INFO)
+    vim.notify("Pi: Or check if there's a pi-rpc extension/package available", vim.log.levels.INFO)
   end)
-
-  -- Spawn pi with RPC flag, redirecting output to /dev/null to avoid TUI pollution
-  local handle, pid
-
-  -- Open /dev/null for redirection
-  local devnull, err = uv.fs_open("/dev/null", "w", 438)
-  if not devnull then
-    vim.schedule(function()
-      vim.notify("Pi: Failed to open /dev/null: " .. tostring(err), vim.log.levels.ERROR)
-    end)
-    if callback then vim.schedule(function() callback(false) end) end
-    return
-  end
-
-  handle, pid = uv.spawn("pi", {
-    args = { "--rpc", "--rpc-port", tostring(port) },
-    stdio = { nil, devnull, devnull },
-    detached = true,
-  }, function(code, signal)
-    -- Process exited
-    vim.schedule(function()
-      if code ~= 0 then
-        vim.notify("Pi: Process exited with code " .. code, vim.log.levels.WARN)
-      end
-    end)
-    M.pi_process = nil
-    uv.fs_close(devnull)
-    if handle then
-      handle:close()
-    end
-  end)
-
-  if not handle then
-    vim.schedule(function()
-      vim.notify("Pi: Failed to spawn process. Is 'pi' in your PATH?", vim.log.levels.ERROR)
-    end)
-    uv.fs_close(devnull)
-    if callback then vim.schedule(function() callback(false) end) end
-    return
-  end
-
-  M.pi_process = { handle = handle, pid = pid }
-
-  -- Wait a moment for the server to start, then verify
-  vim.defer_fn(function()
-    -- Check if process is still running
-    local running = uv.kill(pid, 0)
-    if running ~= 0 then
-      vim.schedule(function()
-        vim.notify("Pi: Process failed to start. Check if 'pi' is installed and working.", vim.log.levels.ERROR)
-      end)
-      M.pi_process = nil
-      if callback then callback(false) end
-      return
-    end
-
-    vim.schedule(function()
-      vim.notify("Pi: RPC server started (PID: " .. pid .. ")", vim.log.levels.INFO)
-    end)
-    if callback then callback(true) end
-  end, 1500)
+  if callback then vim.schedule(function() callback(false) end) end
 end
 
 -- Stop the spawned Pi process
@@ -170,6 +64,7 @@ function M.stop_process()
 end
 
 -- Ensure Pi is running and connected (auto-spawn if needed)
+-- NOTE: Pi v0.52.7 does not have RPC server mode - this requires manual setup
 -- @param opts table: { auto_spawn = true, spawn_callback = function }
 function M.ensure_connected(opts, callback)
   opts = opts or { auto_spawn = true }
@@ -180,62 +75,17 @@ function M.ensure_connected(opts, callback)
     return
   end
 
-  -- Check if Pi is running elsewhere
-  M.is_running(function(running)
-    if running then
-      -- Pi is running, just connect
-      M.connect(function(success)
-        if callback then callback(success) end
-      end)
-    elseif opts.auto_spawn then
-      -- Need to spawn Pi
-      M.spawn(function(spawned)
-        if spawned then
-          -- Wait a bit for server to be ready
-          vim.defer_fn(function()
-            -- Create a fresh client (old one might be in bad state)
-            local Client = require("pi.rpc.client")
-            local fresh_client = Client.new({
-              host = M.config.get("host"),
-              port = M.config.get("port"),
-            })
-            M.state.update("rpc_client", fresh_client)
-            
-            -- Try to connect with retry
-            local attempts = 0
-            local max_attempts = 5
-            
-            local function try_connect()
-              attempts = attempts + 1
-              M.connect(function(success, err)
-                if success then
-                  if callback then callback(true) end
-                elseif attempts < max_attempts then
-                  vim.schedule(function()
-                    vim.notify("Pi: Connection attempt " .. attempts .. " failed, retrying...", vim.log.levels.WARN)
-                  end)
-                  vim.defer_fn(try_connect, 1000)
-                else
-                  vim.schedule(function()
-                    vim.notify("Pi: Failed to connect after " .. max_attempts .. " attempts", vim.log.levels.ERROR)
-                  end)
-                  if callback then callback(false) end
-                end
-              end)
-            end
-            
-            try_connect()
-          end, 2000)
-        else
-          if callback then callback(false) end
-        end
-      end)
-    else
-      vim.schedule(function()
-        vim.notify("Pi: Not running and auto-spawn disabled", vim.log.levels.ERROR)
-      end)
-      if callback then vim.schedule(function() callback(false) end) end
-    end
+  vim.schedule(function()
+    vim.notify("═══════════════════════════════════════════════════", vim.log.levels.WARN)
+    vim.notify("Pi: RPC server mode is NOT available in Pi v0.52.7", vim.log.levels.WARN)
+    vim.notify("Pi: The plugin was designed for a future RPC-enabled version", vim.log.levels.WARN)
+    vim.notify("Pi: Current implementation is based on PLAN.md specification", vim.log.levels.WARN)
+    vim.notify("═══════════════════════════════════════════════════", vim.log.levels.WARN)
+  end)
+
+  -- Try to connect anyway (in case user has a custom RPC wrapper)
+  M.connect(function(success, err)
+    if callback then callback(success) end
   end)
 end
 
