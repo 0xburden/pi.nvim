@@ -3,6 +3,48 @@ local events = require("pi.events")
 
 local M = {}
 
+local HIGHLIGHT_NS = vim.api.nvim_create_namespace("pi_chat_highlights")
+local THINKING_HL = "PiChatThinking"
+local USER_PROMPT_HL = "PiChatUserPrompt"
+
+local function safe_get_highlight(name)
+  local ok, hl = pcall(vim.api.nvim_get_hl_by_name, name, true)
+  if not ok then
+    return {}
+  end
+  return hl
+end
+
+local function setup_highlights()
+  local comment_hl = safe_get_highlight("Comment")
+  local thinking_opts = { italic = true }
+  if comment_hl.foreground then
+    thinking_opts.fg = comment_hl.foreground
+  end
+  if comment_hl.background then
+    thinking_opts.bg = comment_hl.background
+  end
+  vim.api.nvim_set_hl(0, THINKING_HL, thinking_opts)
+
+  local normal_hl = safe_get_highlight("Normal")
+  local pmenu_hl = safe_get_highlight("Pmenu")
+  local user_opts = {}
+  if normal_hl.foreground then
+    user_opts.fg = normal_hl.foreground
+  end
+  if pmenu_hl.background then
+    user_opts.bg = pmenu_hl.background
+  elseif pmenu_hl.foreground then
+    user_opts.bg = pmenu_hl.foreground
+  end
+  if next(user_opts) == nil then
+    user_opts.bg = 0x1f1f1f
+  end
+  vim.api.nvim_set_hl(0, USER_PROMPT_HL, user_opts)
+end
+
+setup_highlights()
+
 -- Window/buffer handles
 M.result_buf = nil
 M.result_win = nil
@@ -27,6 +69,7 @@ M.session_info = {
 
 -- Track edited files
 M.edited_files = {}
+M.pending_file_paths = {}
 
 -- Constants
 M.RESULT_BUF_NAME = "PiChat"
@@ -118,6 +161,37 @@ local function detect_file_paths(event)
     table.insert(unique, path)
   end
   return unique
+end
+
+local function queue_file_path(path)
+  local normalized = normalize_path(path)
+  if not normalized then
+    return
+  end
+  M.pending_file_paths[normalized] = true
+end
+
+local function queue_event_paths(event)
+  local paths = detect_file_paths(event)
+  for _, path in ipairs(paths) do
+    queue_file_path(path)
+  end
+end
+
+local function flush_pending_file_paths()
+  if not next(M.pending_file_paths) then
+    return
+  end
+
+  local to_open = {}
+  for path in pairs(M.pending_file_paths) do
+    table.insert(to_open, path)
+  end
+  M.pending_file_paths = {}
+
+  for _, path in ipairs(to_open) do
+    try_open_file(path)
+  end
 end
 
 local function is_valid_target_window(win)
@@ -338,14 +412,8 @@ function M.handle_event(event)
       end
     end
 
-    -- Open file if it's an edit/write operation
     if filepath and (tool_name == "edit" or tool_name == "write") then
-      if not M.edited_files[filepath] then
-        M.edited_files[filepath] = true
-        vim.defer_fn(function()
-          M.open_file_in_other_window(filepath)
-        end, 100)
-      end
+      queue_file_path(filepath)
     end
 
     if result then
@@ -377,9 +445,9 @@ function M.handle_event(event)
     M.add_message("system", "Error: " .. (event.error or "Unknown error"), false)
   end
 
-  local paths = detect_file_paths(event)
-  for _, path in ipairs(paths) do
-    try_open_file(path)
+  queue_event_paths(event)
+  if event_type == "tool_result" then
+    flush_pending_file_paths()
   end
   
   -- Always re-render after handling an event
@@ -466,9 +534,8 @@ function M.add_tool_call(tool)
 
   M.add_message("tool", display_text, false)
 
-  -- Open file immediately when tool is called (for edit/write tools)
   if filepath and (tool_name == "edit" or tool_name == "write") then
-    try_open_file(filepath)
+    queue_file_path(filepath)
   end
 end
 
@@ -487,6 +554,11 @@ function M.render()
   end
 
   local lines = {}
+  local highlights = {}
+  local function mark_last_line(group)
+    table.insert(highlights, { line = #lines - 1, group = group })
+  end
+
   local width = math.max(40, (M.result_win and vim.api.nvim_win_is_valid(M.result_win)) and vim.api.nvim_win_get_width(M.result_win) - 4 or 40)
 
   -- Title
@@ -521,31 +593,42 @@ function M.render()
   for _, msg in ipairs(M.messages) do
     if msg.role == "user" then
       table.insert(lines, "  ┌─ 👤 You")
-      for _, line in ipairs(vim.split(msg.content, "\n")) do
+      for _, line in ipairs(vim.split(msg.content or "", "\n")) do
         table.insert(lines, "  │ " .. line)
+        mark_last_line(USER_PROMPT_HL)
       end
       table.insert(lines, "  └")
-      
+
     elseif msg.role == "assistant" then
       if msg.streaming then
         table.insert(lines, "  ┌─ 🤖 Pi ●")
       else
         table.insert(lines, "  ┌─ 🤖 Pi")
       end
-      for _, line in ipairs(vim.split(msg.content, "\n")) do
-        table.insert(lines, "  │ " .. line)
+      local thinking_block = false
+      for _, raw in ipairs(vim.split(msg.content or "", "\n")) do
+        local text_line = raw or ""
+        local is_thinking_line = text_line:match("^%s*💭")
+        if is_thinking_line then
+          thinking_block = true
+        elseif thinking_block and text_line:match("^%s*$") then
+          thinking_block = false
+        end
+        table.insert(lines, "  │ " .. text_line)
+        if is_thinking_line or (thinking_block and not text_line:match("^%s*$")) then
+          mark_last_line(THINKING_HL)
+        end
       end
       table.insert(lines, "  └")
-      
+
     elseif msg.role == "tool" then
       table.insert(lines, "  " .. msg.content)
-      
+
     elseif msg.role == "tool_result" then
-      -- Show tool results in a compact format
-      for _, line in ipairs(vim.split(msg.content, "\n")) do
+      for _, line in ipairs(vim.split(msg.content or "", "\n")) do
         table.insert(lines, "  │ " .. line)
       end
-      
+
     elseif msg.role == "system" then
       table.insert(lines, "  ⚠️  " .. msg.content)
     end
@@ -560,6 +643,11 @@ function M.render()
   vim.api.nvim_buf_set_lines(M.result_buf, 0, -1, false, lines)
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
 
+  vim.api.nvim_buf_clear_namespace(M.result_buf, HIGHLIGHT_NS, 0, -1)
+  for _, hl in ipairs(highlights) do
+    vim.api.nvim_buf_add_highlight(M.result_buf, HIGHLIGHT_NS, hl.group, hl.line, 0, -1)
+  end
+
   if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
     local line_count = vim.api.nvim_buf_line_count(M.result_buf)
     if line_count > 0 then
@@ -568,7 +656,6 @@ function M.render()
     end
   end
 end
-
 function M.send_message(text)
   local client = state.get("rpc_client")
   if not client then
