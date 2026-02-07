@@ -364,7 +364,6 @@ function M.handle_event(event)
     end
 
     if result then
-      -- Try to extract path from textual results if we haven't already
       if not filepath then
         filepath = extract_path_from_text(type(result) == "table" and (result.diff or result.output) or result)
         if filepath then
@@ -372,35 +371,20 @@ function M.handle_event(event)
         end
       end
 
-      -- Format tool result nicely
-      local content
       if type(result) == "table" then
-        -- Try to extract meaningful content
         if result.diff then
           queue_text_path(result.diff)
-          content = "Diff:\n" .. result.diff
         elseif result.output then
           queue_text_path(result.output)
-          content = tostring(result.output)
-        else
-          content = vim.inspect(result)
         end
       else
         queue_text_path(result)
-        content = tostring(result)
       end
-
-      -- Truncate if too long
-      if #content > 1000 then
-        content = content:sub(1, 1000) .. "... (truncated)"
-      end
-
-      M.add_message("tool_result", "[" .. tool_name .. " result]:\n" .. content, false)
     end
 
   end
 
-  if event.message and event.message.role == "toolResult" then
+  if event.type == "message_end" and event.message and event.message.role == "toolResult" then
     local tool_name = event.message.toolName or event.message.tool or "tool"
     local tool_message_parts = {}
     for _, chunk in ipairs(event.message.content or {}) do
