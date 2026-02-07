@@ -97,6 +97,21 @@ local function normalize_path(path)
   return vim.fn.fnamemodify(path, ":p")
 end
 
+local function extract_path_from_text(text)
+  if type(text) ~= "string" then
+    return nil
+  end
+  for line in text:gmatch("[^\r\n]+") do
+    local candidate = line:match("Filepath:%s*(.+)")
+      or line:match("filepath:%s*(.+)")
+      or line:match("File:%s*(.+)")
+      or line:match("file:%s*(.+)")
+    if candidate then
+      return normalize_path(candidate)
+    end
+  end
+  return nil
+end
 
 local function queue_file_path(path)
   local normalized = normalize_path(path)
@@ -104,6 +119,13 @@ local function queue_file_path(path)
     return
   end
   M.pending_file_paths[normalized] = true
+end
+
+local function queue_text_path(text)
+  local path = extract_path_from_text(text)
+  if path then
+    queue_file_path(path)
+  end
 end
 
 local function flush_pending_file_paths()
@@ -342,18 +364,29 @@ function M.handle_event(event)
     end
 
     if result then
+      -- Try to extract path from textual results if we haven't already
+      if not filepath then
+        filepath = extract_path_from_text(type(result) == "table" and (result.diff or result.output) or result)
+        if filepath then
+          queue_file_path(filepath)
+        end
+      end
+
       -- Format tool result nicely
       local content
       if type(result) == "table" then
         -- Try to extract meaningful content
         if result.diff then
+          queue_text_path(result.diff)
           content = "Diff:\n" .. result.diff
         elseif result.output then
+          queue_text_path(result.output)
           content = tostring(result.output)
         else
           content = vim.inspect(result)
         end
       else
+        queue_text_path(result)
         content = tostring(result)
       end
 
