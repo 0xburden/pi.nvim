@@ -87,17 +87,25 @@ function M.spawn(callback)
     vim.notify("Pi: Starting RPC server on port " .. port .. "...", vim.log.levels.INFO)
   end)
 
-  -- Collect stderr for error reporting
-  local stderr_data = {}
-
-  -- Spawn pi with RPC flag
+  -- Spawn pi with RPC flag, redirecting output to /dev/null to avoid TUI pollution
   local handle, pid
+  local stdin = uv.new_pipe(false)
   local stdout = uv.new_pipe(false)
   local stderr = uv.new_pipe(false)
 
+  -- Open /dev/null for redirection
+  local devnull, err = uv.fs_open("/dev/null", "w", 438)
+  if not devnull then
+    vim.schedule(function()
+      vim.notify("Pi: Failed to open /dev/null: " .. tostring(err), vim.log.levels.ERROR)
+    end)
+    if callback then vim.schedule(function() callback(false) end) end
+    return
+  end
+
   handle, pid = uv.spawn("pi", {
     args = { "--rpc", "--rpc-port", tostring(port) },
-    stdio = { nil, stdout, stderr },
+    stdio = { stdin, devnull, devnull },
     detached = true,
   }, function(code, signal)
     -- Process exited
@@ -107,6 +115,7 @@ function M.spawn(callback)
       end
     end)
     M.pi_process = nil
+    uv.fs_close(devnull)
     if handle then
       handle:close()
     end
@@ -116,32 +125,12 @@ function M.spawn(callback)
     vim.schedule(function()
       vim.notify("Pi: Failed to spawn process. Is 'pi' in your PATH?", vim.log.levels.ERROR)
     end)
+    uv.fs_close(devnull)
     if callback then vim.schedule(function() callback(false) end) end
     return
   end
 
   M.pi_process = { handle = handle, pid = pid }
-
-  -- Read stdout/stderr for debugging
-  local function on_read(stream, name)
-    return function(err, data)
-      if err then
-        return
-      end
-      if data then
-        if name == "stderr" then
-          table.insert(stderr_data, data)
-        end
-        vim.schedule(function()
-          -- Log to messages for debugging
-          vim.notify("Pi [" .. name .. "]: " .. data:gsub("%s+$", ""), vim.log.levels.DEBUG)
-        end)
-      end
-    end
-  end
-
-  stdout:read_start(on_read(stdout, "stdout"))
-  stderr:read_start(on_read(stderr, "stderr"))
 
   -- Wait a moment for the server to start, then verify
   vim.defer_fn(function()
@@ -149,8 +138,7 @@ function M.spawn(callback)
     local running = uv.kill(pid, 0)
     if running ~= 0 then
       vim.schedule(function()
-        local err_msg = table.concat(stderr_data, "\n")
-        vim.notify("Pi: Process failed to start. Error: " .. err_msg, vim.log.levels.ERROR)
+        vim.notify("Pi: Process failed to start. Check if 'pi' is installed and working.", vim.log.levels.ERROR)
       end)
       M.pi_process = nil
       if callback then callback(false) end
