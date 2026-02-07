@@ -556,7 +556,9 @@ function M.render()
       vim.api.nvim_win_set_cursor(M.result_win, { scroll_to, 0 })
     end
   end
-endfunction M.send_message(text)
+end
+
+function M.send_message(text)
   local client = state.get("rpc_client")
   if not client then
     vim.notify("Pi: Not connected", vim.log.levels.ERROR)
