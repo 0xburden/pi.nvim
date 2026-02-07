@@ -141,6 +141,8 @@ function M.subscribe_to_events()
   M.event_unsub = events.on("rpc_event", function(event)
     if not event then return end
     
+    vim.notify("Chat received event: " .. tostring(event.type), vim.log.levels.INFO)
+    
     -- Handle different event types
     if event.type == "agent_start" then
       M.is_streaming = true
