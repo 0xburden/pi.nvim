@@ -830,3 +830,84 @@ vim.api.nvim_create_user_command("PiFollowUpMode", function(opts)
     end
   end)
 end, { nargs = "?", desc = "Set follow-up mode (all, one-at-a-time)" })
+
+-- Command discovery
+vim.api.nvim_create_user_command("PiCommands", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local commands_mod = require("pi.rpc.commands")
+  local filter = opts.args ~= "" and opts.args or nil
+  
+  commands_mod.get_all(client, function(result)
+    if result and result.success then
+      local commands = result.data and result.data.commands or {}
+      
+      -- Apply filter if specified
+      if filter then
+        local filtered = {}
+        for _, cmd in ipairs(commands) do
+          if cmd.source == filter then
+            table.insert(filtered, cmd)
+          end
+        end
+        commands = filtered
+      end
+      
+      if #commands == 0 then
+        print("No commands found" .. (filter and (" for source: " .. filter) or ""))
+        return
+      end
+      
+      print("=== Pi Commands (" .. #commands .. ") ===")
+      
+      -- Group by source
+      local by_source = {}
+      for _, cmd in ipairs(commands) do
+        local source = cmd.source or "unknown"
+        by_source[source] = by_source[source] or {}
+        table.insert(by_source[source], cmd)
+      end
+      
+      local order = { "extension", "prompt", "skill" }
+      for _, source in ipairs(order) do
+        local cmds = by_source[source]
+        if cmds and #cmds > 0 then
+          print("\n[" .. source:upper() .. "]")
+          for _, cmd in ipairs(cmds) do
+            local desc = cmd.description and (" - " .. cmd.description) or ""
+            local loc = cmd.location and (" (" .. cmd.location .. ")") or ""
+            print("  /" .. cmd.name .. desc .. loc)
+          end
+        end
+      end
+    else
+      vim.notify("Pi: Failed to get commands - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { nargs = "?", desc = "List available commands (optional filter: extension, prompt, skill)" })
+
+vim.api.nvim_create_user_command("PiRun", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local command = opts.args
+  if command == "" then
+    vim.notify("Usage: :PiRun <command> [args]", vim.log.levels.ERROR)
+    return
+  end
+  
+  -- Ensure command starts with /
+  if not command:match("^/") then
+    command = "/" .. command
+  end
+  
+  -- Send as prompt (Pi will handle command execution)
+  require("pi").start(command)
+end, { nargs = "+", desc = "Run a Pi command (e.g., :PiRun skill:search query)" })
