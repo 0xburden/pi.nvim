@@ -20,19 +20,52 @@ vim.api.nvim_create_user_command("PiStart", function(opts)
     return
   end
   require("pi").start(task)
-end, { nargs = "+", desc = "Start Pi agent with task" })
+end, { nargs = "+", desc = "Send prompt to Pi agent" })
 
-vim.api.nvim_create_user_command("PiPause", function()
-  require("pi").pause()
-end, { desc = "Pause the agent" })
+vim.api.nvim_create_user_command("PiSteer", function(opts)
+  local message = opts.args
+  if message == "" then
+    vim.notify("Usage: :PiSteer <message>", vim.log.levels.ERROR)
+    return
+  end
+  require("pi").steer(message)
+end, { nargs = "+", desc = "Steer agent mid-run (interrupt with new instructions)" })
 
-vim.api.nvim_create_user_command("PiResume", function()
-  require("pi").resume()
-end, { desc = "Resume the agent" })
+vim.api.nvim_create_user_command("PiFollowUp", function(opts)
+  local message = opts.args
+  if message == "" then
+    vim.notify("Usage: :PiFollowUp <message>", vim.log.levels.ERROR)
+    return
+  end
+  require("pi").follow_up(message)
+end, { nargs = "+", desc = "Queue follow-up message (processed after agent finishes)" })
 
+vim.api.nvim_create_user_command("PiAbort", function()
+  require("pi").abort()
+end, { desc = "Abort current agent operation" })
+
+-- Alias for backward compatibility
 vim.api.nvim_create_user_command("PiStop", function()
-  require("pi").stop()
-end, { desc = "Stop/abort the agent" })
+  require("pi").abort()
+end, { desc = "Abort current agent operation (alias for :PiAbort)" })
+
+vim.api.nvim_create_user_command("PiStatus", function()
+  require("pi").status(function(result)
+    if result and result.success then
+      local data = result.data
+      print("Pi Agent Status:")
+      print("  Streaming: " .. tostring(data.isStreaming))
+      print("  Model: " .. (data.model and data.model.name or "none"))
+      print("  Thinking: " .. (data.thinkingLevel or "off"))
+      print("  Session: " .. (data.sessionName or data.sessionId or "none"))
+      print("  Messages: " .. (data.messageCount or 0))
+      print("  Pending: " .. (data.pendingMessageCount or 0))
+      print("  Auto-compact: " .. tostring(data.autoCompactionEnabled))
+    else
+      vim.notify("Pi: Failed to get status", vim.log.levels.ERROR)
+    end
+  end)
+end, { desc = "Show Pi agent status" })
 
 -- UI commands
 vim.api.nvim_create_user_command("PiToggle", function()

@@ -52,33 +52,35 @@ function M.disconnect()
   end
 end
 
-function M.start(task)
+--- Send a prompt to the agent
+-- @param task string The task/prompt to send
+-- @param opts table|nil Options: { images = {...}, streamingBehavior = "steer"|"followUp" }
+function M.start(task, opts)
   if not M.state.get("connected") then
     M.connect(function(success)
       if success then
-        M._send_prompt(task)
+        M._send_prompt(task, opts)
       end
     end)
     return
   end
-  M._send_prompt(task)
+  M._send_prompt(task, opts)
 end
 
-function M._send_prompt(task)
+function M._send_prompt(task, opts)
   local client = M.state.get("rpc_client")
   if not client then
     vim.notify("Pi: Not connected", vim.log.levels.ERROR)
     return
   end
-  client:request("prompt", { type = "prompt", message = task }, function(result)
+  
+  local agent = require("pi.rpc.agent")
+  agent.prompt(client, task, opts, function(result)
     vim.schedule(function()
       if result.error then
         vim.notify("Pi: Failed to send prompt - " .. result.error, vim.log.levels.ERROR)
       else
         vim.notify("Pi: Prompt sent", vim.log.levels.INFO)
-        M.state.update("agent.running", true)
-        M.state.update("agent.current_task", task)
-
         if M.config.get("auto_open_logs") then
           require("pi.ui.logs_viewer").open()
         end
@@ -87,48 +89,82 @@ function M._send_prompt(task)
   end)
 end
 
-function M.pause()
+--- Steer the agent mid-run (interrupt with new instructions)
+-- @param message string The steering message
+-- @param opts table|nil Options: { images = {...} }
+function M.steer(message, opts)
   local client = M.state.get("rpc_client")
-  if not client then return end
-  client:request("pause", { type = "pause" }, function(result)
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local agent = require("pi.rpc.agent")
+  agent.steer(client, message, opts, function(result)
     vim.schedule(function()
       if result.error then
-        vim.notify("Pi: Failed to pause - " .. result.error, vim.log.levels.ERROR)
+        vim.notify("Pi: Failed to steer - " .. result.error, vim.log.levels.ERROR)
       else
-        M.state.update("agent.paused", true)
+        vim.notify("Pi: Steering message sent", vim.log.levels.INFO)
       end
     end)
   end)
 end
 
-function M.resume()
+--- Queue a follow-up message to be processed after agent finishes
+-- @param message string The follow-up message
+-- @param opts table|nil Options: { images = {...} }
+function M.follow_up(message, opts)
   local client = M.state.get("rpc_client")
-  if not client then return end
-  client:request("resume", { type = "resume" }, function(result)
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local agent = require("pi.rpc.agent")
+  agent.follow_up(client, message, opts, function(result)
     vim.schedule(function()
       if result.error then
-        vim.notify("Pi: Failed to resume - " .. result.error, vim.log.levels.ERROR)
+        vim.notify("Pi: Failed to queue follow-up - " .. result.error, vim.log.levels.ERROR)
       else
-        M.state.update("agent.paused", false)
+        vim.notify("Pi: Follow-up queued", vim.log.levels.INFO)
       end
     end)
   end)
 end
 
+--- Abort the current agent operation
+function M.abort()
+  local client = M.state.get("rpc_client")
+  if not client then return end
+  
+  local agent = require("pi.rpc.agent")
+  agent.abort(client, function(result)
+    vim.schedule(function()
+      if result.error then
+        vim.notify("Pi: Failed to abort - " .. result.error, vim.log.levels.ERROR)
+      else
+        vim.notify("Pi: Agent aborted", vim.log.levels.INFO)
+      end
+    end)
+  end)
+end
+
+-- Alias for backward compatibility
 function M.stop()
+  M.abort()
+end
+
+--- Get current agent status
+function M.status(callback)
   local client = M.state.get("rpc_client")
-  if not client then return end
-  client:request("abort", { type = "abort" }, function(result)
-    vim.schedule(function()
-      if result.error then
-        vim.notify("Pi: Failed to stop - " .. result.error, vim.log.levels.ERROR)
-      else
-        M.state.update("agent.running", false)
-        M.state.update("agent.paused", false)
-        M.state.update("agent.current_task", nil)
-      end
-    end)
-  end)
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local agent = require("pi.rpc.agent")
+  agent.status(client, callback)
 end
 
 return M
