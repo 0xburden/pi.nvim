@@ -182,15 +182,182 @@ end, { nargs = "?", complete = "file", desc = "Test opening file in other window
 
 vim.api.nvim_create_user_command("PiSessionNew", function(opts)
   local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
   local session = require("pi.rpc.session")
   session.new(client, {}, function(result)
     if result and result.success then
-      vim.notify("New session started", vim.log.levels.INFO)
+      if result.data and result.data.cancelled then
+        vim.notify("Pi: New session cancelled by extension", vim.log.levels.WARN)
+      else
+        vim.notify("Pi: New session started", vim.log.levels.INFO)
+      end
     else
-      vim.notify("Failed to start new session", vim.log.levels.ERROR)
+      vim.notify("Pi: Failed to start new session - " .. (result.error or "unknown"), vim.log.levels.ERROR)
     end
   end)
 end, { desc = "Start a new session" })
+
+vim.api.nvim_create_user_command("PiSessionStats", function()
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  local session = require("pi.rpc.session")
+  session.get_stats(client, function(result)
+    if result and result.success then
+      local data = result.data
+      print("=== Session Statistics ===")
+      print("  Session ID: " .. (data.sessionId or "?"))
+      print("  Session File: " .. (data.sessionFile or "?"))
+      print("  User Messages: " .. (data.userMessages or 0))
+      print("  Assistant Messages: " .. (data.assistantMessages or 0))
+      print("  Tool Calls: " .. (data.toolCalls or 0))
+      print("  Total Messages: " .. (data.totalMessages or 0))
+      if data.tokens then
+        print("  Tokens:")
+        print("    Input: " .. (data.tokens.input or 0))
+        print("    Output: " .. (data.tokens.output or 0))
+        print("    Cache Read: " .. (data.tokens.cacheRead or 0))
+        print("    Cache Write: " .. (data.tokens.cacheWrite or 0))
+        print("    Total: " .. (data.tokens.total or 0))
+      end
+      if data.cost then
+        print(string.format("  Cost: $%.4f", data.cost))
+      end
+    else
+      vim.notify("Pi: Failed to get stats - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { desc = "Show session statistics" })
+
+vim.api.nvim_create_user_command("PiSessionExport", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  local session = require("pi.rpc.session")
+  local export_opts = {}
+  if opts.args ~= "" then
+    export_opts.outputPath = opts.args
+  end
+  session.export_html(client, export_opts, function(result)
+    if result and result.success then
+      local path = result.data and result.data.path or "?"
+      vim.notify("Pi: Session exported to " .. path, vim.log.levels.INFO)
+    else
+      vim.notify("Pi: Export failed - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { nargs = "?", complete = "file", desc = "Export session to HTML" })
+
+vim.api.nvim_create_user_command("PiSessionSwitch", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  if opts.args == "" then
+    vim.notify("Usage: :PiSessionSwitch <path/to/session.jsonl>", vim.log.levels.ERROR)
+    return
+  end
+  local session = require("pi.rpc.session")
+  session.switch(client, opts.args, function(result)
+    if result and result.success then
+      if result.data and result.data.cancelled then
+        vim.notify("Pi: Session switch cancelled by extension", vim.log.levels.WARN)
+      else
+        vim.notify("Pi: Switched to session", vim.log.levels.INFO)
+      end
+    else
+      vim.notify("Pi: Failed to switch session - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { nargs = 1, complete = "file", desc = "Switch to a different session file" })
+
+vim.api.nvim_create_user_command("PiSessionName", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  if opts.args == "" then
+    vim.notify("Usage: :PiSessionName <name>", vim.log.levels.ERROR)
+    return
+  end
+  local session = require("pi.rpc.session")
+  session.set_name(client, opts.args, function(result)
+    if result and result.success then
+      vim.notify("Pi: Session name set to '" .. opts.args .. "'", vim.log.levels.INFO)
+    else
+      vim.notify("Pi: Failed to set name - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { nargs = "+", desc = "Set session display name" })
+
+vim.api.nvim_create_user_command("PiSessionFork", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  local session = require("pi.rpc.session")
+  
+  if opts.args ~= "" then
+    -- Fork from specific entry ID
+    session.fork(client, opts.args, function(result)
+      if result and result.success then
+        if result.data and result.data.cancelled then
+          vim.notify("Pi: Fork cancelled by extension", vim.log.levels.WARN)
+        else
+          vim.notify("Pi: Forked from message", vim.log.levels.INFO)
+        end
+      else
+        vim.notify("Pi: Fork failed - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+      end
+    end)
+  else
+    -- Show available fork points
+    session.get_fork_messages(client, function(result)
+      if result and result.success then
+        local messages = result.data and result.data.messages or {}
+        if #messages == 0 then
+          vim.notify("Pi: No messages available to fork from", vim.log.levels.INFO)
+          return
+        end
+        
+        -- Use vim.ui.select to pick a message
+        local items = {}
+        for _, msg in ipairs(messages) do
+          local text = msg.text:sub(1, 60):gsub("\n", " ")
+          if #msg.text > 60 then text = text .. "..." end
+          table.insert(items, { id = msg.entryId, display = text })
+        end
+        
+        vim.ui.select(items, {
+          prompt = "Fork from message:",
+          format_item = function(item) return item.display end,
+        }, function(choice)
+          if choice then
+            session.fork(client, choice.id, function(fork_result)
+              if fork_result and fork_result.success then
+                vim.notify("Pi: Forked from message", vim.log.levels.INFO)
+              else
+                vim.notify("Pi: Fork failed", vim.log.levels.ERROR)
+              end
+            end)
+          end
+        end)
+      else
+        vim.notify("Pi: Failed to get fork messages - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+      end
+    end)
+  end
+end, { nargs = "?", desc = "Fork from a previous message (interactive if no ID given)" })
 
 -- Conversation commands
 vim.api.nvim_create_user_command("PiMessages", function(opts)
