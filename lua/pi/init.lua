@@ -191,4 +191,52 @@ function M.get_last_response(callback)
   conversation.get_last_assistant_text(client, callback)
 end
 
+--- Execute a bash command (output added to conversation context on next prompt)
+-- @param command string The shell command to execute
+-- @param callback function|nil Called with result
+function M.bash(command, callback)
+  local client = M.state.get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local bash = require("pi.rpc.bash")
+  bash.execute(client, command, function(result)
+    vim.schedule(function()
+      if result and result.success then
+        local data = result.data or {}
+        local exit_code = data.exitCode or 0
+        local truncated = data.truncated and " (truncated)" or ""
+        vim.notify(string.format("Pi: Bash completed (exit %d)%s", exit_code, truncated), vim.log.levels.INFO)
+      elseif result and result.error then
+        vim.notify("Pi: Bash failed - " .. result.error, vim.log.levels.ERROR)
+      end
+      if callback then callback(result) end
+    end)
+  end)
+end
+
+--- Abort a running bash command
+function M.abort_bash()
+  local client = M.state.get("rpc_client")
+  if not client then return end
+  
+  local bash = require("pi.rpc.bash")
+  if not bash.is_running() then
+    vim.notify("Pi: No bash command running", vim.log.levels.WARN)
+    return
+  end
+  
+  bash.abort(client, function(result)
+    vim.schedule(function()
+      if result and result.success then
+        vim.notify("Pi: Bash command aborted", vim.log.levels.INFO)
+      else
+        vim.notify("Pi: Failed to abort bash", vim.log.levels.ERROR)
+      end
+    end)
+  end)
+end
+
 return M

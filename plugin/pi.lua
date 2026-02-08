@@ -270,3 +270,70 @@ vim.api.nvim_create_user_command("PiLastResponse", function()
     end
   end)
 end, { desc = "Show last assistant response in buffer" })
+
+-- Bash commands
+vim.api.nvim_create_user_command("PiBash", function(opts)
+  local command = opts.args
+  if command == "" then
+    vim.notify("Usage: :PiBash <shell command>", vim.log.levels.ERROR)
+    return
+  end
+  require("pi").bash(command)
+end, { nargs = "+", desc = "Execute bash command (output added to next prompt)" })
+
+vim.api.nvim_create_user_command("PiBashAbort", function()
+  require("pi").abort_bash()
+end, { desc = "Abort running bash command" })
+
+vim.api.nvim_create_user_command("PiBashLast", function()
+  local bash = require("pi.rpc.bash")
+  local last = bash.get_last()
+  
+  if not last then
+    vim.notify("No bash execution history", vim.log.levels.INFO)
+    return
+  end
+  
+  -- Open output in a scratch buffer
+  local buf = vim.api.nvim_create_buf(false, true)
+  local lines = {
+    "# Command: " .. last.command,
+    "# Exit code: " .. (last.exit_code or "?"),
+    "# Truncated: " .. tostring(last.truncated or false),
+    "",
+  }
+  
+  if last.output then
+    for _, line in ipairs(vim.split(last.output, "\n")) do
+      table.insert(lines, line)
+    end
+  else
+    table.insert(lines, "(no output)")
+  end
+  
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].filetype = "sh"
+  vim.bo[buf].bufhidden = "wipe"
+  
+  vim.cmd("split")
+  vim.api.nvim_win_set_buf(0, buf)
+  vim.api.nvim_buf_set_name(buf, "[Pi Bash Output]")
+end, { desc = "Show last bash command output" })
+
+vim.api.nvim_create_user_command("PiBashHistory", function()
+  local bash = require("pi.rpc.bash")
+  local history = bash.get_history()
+  
+  if #history == 0 then
+    print("No bash execution history")
+    return
+  end
+  
+  print("=== Bash History (" .. #history .. " commands) ===")
+  for i, exec in ipairs(history) do
+    local status = exec.exit_code == 0 and "✓" or "✗"
+    local truncated = exec.truncated and " (truncated)" or ""
+    print(string.format("%d. [%s] %s%s", i, status, exec.command:sub(1, 60), truncated))
+  end
+end, { desc = "Show bash execution history" })

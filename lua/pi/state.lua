@@ -70,6 +70,14 @@ M.state = {
   commands = {
     available = {},
   },
+  
+  -- Bash execution
+  bash = {
+    running = false,
+    current_command = nil,
+    last_execution = nil,
+    executions = {},    -- History of executions (max 50)
+  },
 }
 
 -- Update state and emit event
