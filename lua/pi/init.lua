@@ -167,4 +167,28 @@ function M.status(callback)
   agent.status(client, callback)
 end
 
+--- Get conversation messages
+function M.get_messages(callback)
+  local client = M.state.get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local conversation = require("pi.rpc.conversation")
+  conversation.get_messages(client, callback)
+end
+
+--- Get last assistant response text
+function M.get_last_response(callback)
+  local client = M.state.get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local conversation = require("pi.rpc.conversation")
+  conversation.get_last_assistant_text(client, callback)
+end
+
 return M

@@ -191,3 +191,82 @@ vim.api.nvim_create_user_command("PiSessionNew", function(opts)
     end
   end)
 end, { desc = "Start a new session" })
+
+-- Conversation commands
+vim.api.nvim_create_user_command("PiMessages", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local conversation = require("pi.rpc.conversation")
+  conversation.get_messages(client, function(result)
+    if result and result.success then
+      local messages = result.data and result.data.messages or {}
+      
+      if #messages == 0 then
+        print("No messages in conversation")
+        return
+      end
+      
+      print("=== Conversation (" .. #messages .. " messages) ===")
+      for i, msg in ipairs(messages) do
+        local formatted = conversation.format_message(msg)
+        local role = formatted.role:upper()
+        local text = formatted.text:sub(1, 100)
+        if #formatted.text > 100 then
+          text = text .. "..."
+        end
+        
+        -- Add tool info for tool results
+        local extra = ""
+        if formatted.role == "toolResult" then
+          extra = " [" .. (formatted.tool_name or "?") .. "]"
+        elseif formatted.role == "assistant" and #formatted.tool_calls > 0 then
+          local tools = {}
+          for _, tc in ipairs(formatted.tool_calls) do
+            table.insert(tools, tc.name)
+          end
+          extra = " → " .. table.concat(tools, ", ")
+        end
+        
+        print(string.format("%d. [%s]%s %s", i, role, extra, text:gsub("\n", " ")))
+      end
+    else
+      vim.notify("Failed to get messages: " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { desc = "Show conversation messages" })
+
+vim.api.nvim_create_user_command("PiLastResponse", function()
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local conversation = require("pi.rpc.conversation")
+  conversation.get_last_assistant_text(client, function(result)
+    if result and result.success then
+      local text = result.data and result.data.text
+      if text then
+        -- Open in a scratch buffer for easy copying
+        local buf = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(text, "\n"))
+        vim.bo[buf].buftype = "nofile"
+        vim.bo[buf].filetype = "markdown"
+        vim.bo[buf].bufhidden = "wipe"
+        
+        -- Open in a split
+        vim.cmd("split")
+        vim.api.nvim_win_set_buf(0, buf)
+        vim.api.nvim_buf_set_name(buf, "[Pi Last Response]")
+      else
+        vim.notify("No assistant response yet", vim.log.levels.INFO)
+      end
+    else
+      vim.notify("Failed to get last response", vim.log.levels.ERROR)
+    end
+  end)
+end, { desc = "Show last assistant response in buffer" })

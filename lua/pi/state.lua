@@ -11,9 +11,23 @@ M.state = {
   -- Agent state
   agent = {
     running = false,
-    paused = false,
     current_task = nil,
     session_id = nil,
+    session_file = nil,
+    session_name = nil,
+    model = nil,
+    thinking_level = nil,
+    message_count = 0,
+    pending_message_count = 0,
+    auto_compaction = true,
+    steering_mode = "one-at-a-time",
+    follow_up_mode = "one-at-a-time",
+  },
+  
+  -- Conversation
+  conversation = {
+    messages = {},           -- Array of AgentMessage objects
+    last_assistant_text = nil,
   },
   
   -- Files being modified
@@ -35,11 +49,25 @@ M.state = {
     diff_viewer_open = false,
     logs_open = false,
     chat_open = false,
+    statuses = {},     -- Extension status entries
+    widgets = {},      -- Extension widgets
+    editor_prefill = nil,
   },
   
   -- Sessions
   sessions = {
     current = nil,
+    available = {},
+  },
+  
+  -- Model
+  model = {
+    current = nil,
+    available = {},
+  },
+  
+  -- Commands
+  commands = {
     available = {},
   },
 }
