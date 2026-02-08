@@ -538,3 +538,136 @@ vim.api.nvim_create_user_command("PiExtensionWidgets", function()
     end
   end
 end, { desc = "Show extension widgets" })
+
+-- Model commands
+vim.api.nvim_create_user_command("PiModel", function()
+  local model_mod = require("pi.rpc.model")
+  local current = model_mod.get_current()
+  local level = model_mod.get_thinking_level()
+  
+  if current then
+    print("Current Model: " .. model_mod.format(current))
+    print("  ID: " .. (current.id or "?"))
+    print("  Provider: " .. (current.provider or "?"))
+    print("  Reasoning: " .. tostring(current.reasoning or false))
+    print("  Context Window: " .. (current.contextWindow or "?"))
+    print("  Thinking Level: " .. (level or "off"))
+  else
+    print("No model selected")
+  end
+end, { desc = "Show current model info" })
+
+vim.api.nvim_create_user_command("PiModelSet", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local args = vim.split(opts.args, "%s+")
+  if #args < 2 then
+    vim.notify("Usage: :PiModelSet <provider> <modelId>", vim.log.levels.ERROR)
+    return
+  end
+  
+  local provider, modelId = args[1], args[2]
+  local model_mod = require("pi.rpc.model")
+  model_mod.set(client, provider, modelId, function(result)
+    if result and result.success then
+      vim.notify("Pi: Model set to " .. model_mod.format(result.data), vim.log.levels.INFO)
+    else
+      vim.notify("Pi: Failed to set model - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { nargs = "+", desc = "Set model: :PiModelSet <provider> <modelId>" })
+
+vim.api.nvim_create_user_command("PiModelCycle", function()
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local model_mod = require("pi.rpc.model")
+  model_mod.cycle(client, function(result)
+    if result and result.success then
+      if result.data and result.data.model then
+        vim.notify("Pi: Cycled to " .. model_mod.format(result.data.model), vim.log.levels.INFO)
+      else
+        vim.notify("Pi: Only one model available", vim.log.levels.INFO)
+      end
+    else
+      vim.notify("Pi: Failed to cycle model - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { desc = "Cycle to next available model" })
+
+vim.api.nvim_create_user_command("PiModelList", function()
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local model_mod = require("pi.rpc.model")
+  model_mod.get_available(client, function(result)
+    if result and result.success then
+      local models = result.data and result.data.models or {}
+      if #models == 0 then
+        print("No models available")
+        return
+      end
+      
+      print("=== Available Models ===")
+      local current = model_mod.get_current()
+      for _, model in ipairs(models) do
+        local marker = (current and current.id == model.id) and " *" or ""
+        local reasoning = model.reasoning and " [reasoning]" or ""
+        print(string.format("  %s (%s)%s%s", model.name or model.id, model.provider, reasoning, marker))
+      end
+    else
+      vim.notify("Pi: Failed to list models - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { desc = "List available models" })
+
+vim.api.nvim_create_user_command("PiThinking", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local model_mod = require("pi.rpc.model")
+  
+  if opts.args == "" then
+    -- Cycle thinking level
+    model_mod.cycle_thinking_level(client, function(result)
+      if result and result.success then
+        if result.data and result.data.level then
+          vim.notify("Pi: Thinking level: " .. result.data.level, vim.log.levels.INFO)
+        else
+          vim.notify("Pi: Model doesn't support thinking", vim.log.levels.WARN)
+        end
+      else
+        vim.notify("Pi: Failed to cycle thinking - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+      end
+    end)
+  else
+    -- Set specific level
+    local level = opts.args
+    local valid = { off = true, minimal = true, low = true, medium = true, high = true, xhigh = true }
+    if not valid[level] then
+      vim.notify("Pi: Invalid level. Use: off, minimal, low, medium, high, xhigh", vim.log.levels.ERROR)
+      return
+    end
+    
+    model_mod.set_thinking_level(client, level, function(result)
+      if result and result.success then
+        vim.notify("Pi: Thinking level set to " .. level, vim.log.levels.INFO)
+      else
+        vim.notify("Pi: Failed to set thinking - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+      end
+    end)
+  end
+end, { nargs = "?", desc = "Set/cycle thinking level (off, minimal, low, medium, high, xhigh)" })
