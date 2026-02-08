@@ -671,3 +671,162 @@ vim.api.nvim_create_user_command("PiThinking", function(opts)
     end)
   end
 end, { nargs = "?", desc = "Set/cycle thinking level (off, minimal, low, medium, high, xhigh)" })
+
+-- Maintenance commands
+vim.api.nvim_create_user_command("PiCompact", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local maint = require("pi.rpc.maintenance")
+  local instructions = opts.args ~= "" and opts.args or nil
+  
+  vim.notify("Pi: Compacting conversation...", vim.log.levels.INFO)
+  maint.compact(client, instructions, function(result)
+    if result and result.success then
+      local data = result.data or {}
+      local tokens_before = data.tokensBefore or "?"
+      vim.notify(string.format("Pi: Compacted (was %s tokens)", tokens_before), vim.log.levels.INFO)
+    else
+      vim.notify("Pi: Compaction failed - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { nargs = "?", desc = "Compact conversation (optional: custom instructions)" })
+
+vim.api.nvim_create_user_command("PiAutoCompact", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local maint = require("pi.rpc.maintenance")
+  local enabled = opts.args == "on" or opts.args == "true" or opts.args == "1"
+  local disabled = opts.args == "off" or opts.args == "false" or opts.args == "0"
+  
+  if not enabled and not disabled then
+    -- Show current status
+    local current = require("pi.state").get("agent.auto_compaction")
+    vim.notify("Pi: Auto-compaction is " .. (current and "enabled" or "disabled"), vim.log.levels.INFO)
+    return
+  end
+  
+  maint.set_auto_compaction(client, enabled, function(result)
+    if result and result.success then
+      vim.notify("Pi: Auto-compaction " .. (enabled and "enabled" or "disabled"), vim.log.levels.INFO)
+    else
+      vim.notify("Pi: Failed - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { nargs = "?", desc = "Set auto-compaction (on/off)" })
+
+vim.api.nvim_create_user_command("PiAutoRetry", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local maint = require("pi.rpc.maintenance")
+  local enabled = opts.args == "on" or opts.args == "true" or opts.args == "1"
+  local disabled = opts.args == "off" or opts.args == "false" or opts.args == "0"
+  
+  if not enabled and not disabled then
+    -- Show current status
+    local current = require("pi.state").get("agent.auto_retry")
+    vim.notify("Pi: Auto-retry is " .. (current and "enabled" or "disabled"), vim.log.levels.INFO)
+    return
+  end
+  
+  maint.set_auto_retry(client, enabled, function(result)
+    if result and result.success then
+      vim.notify("Pi: Auto-retry " .. (enabled and "enabled" or "disabled"), vim.log.levels.INFO)
+    else
+      vim.notify("Pi: Failed - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { nargs = "?", desc = "Set auto-retry (on/off)" })
+
+vim.api.nvim_create_user_command("PiAbortRetry", function()
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local maint = require("pi.rpc.maintenance")
+  if not maint.is_retrying() then
+    vim.notify("Pi: No retry in progress", vim.log.levels.WARN)
+    return
+  end
+  
+  maint.abort_retry(client, function(result)
+    if result and result.success then
+      vim.notify("Pi: Retry aborted", vim.log.levels.INFO)
+    else
+      vim.notify("Pi: Failed to abort retry - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { desc = "Abort in-progress retry" })
+
+vim.api.nvim_create_user_command("PiSteeringMode", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local maint = require("pi.rpc.maintenance")
+  local mode = opts.args
+  
+  if mode == "" then
+    local current = require("pi.state").get("agent.steering_mode") or "one-at-a-time"
+    vim.notify("Pi: Steering mode: " .. current, vim.log.levels.INFO)
+    return
+  end
+  
+  if mode ~= "all" and mode ~= "one-at-a-time" then
+    vim.notify("Pi: Invalid mode. Use: all, one-at-a-time", vim.log.levels.ERROR)
+    return
+  end
+  
+  maint.set_steering_mode(client, mode, function(result)
+    if result and result.success then
+      vim.notify("Pi: Steering mode set to " .. mode, vim.log.levels.INFO)
+    else
+      vim.notify("Pi: Failed - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { nargs = "?", desc = "Set steering mode (all, one-at-a-time)" })
+
+vim.api.nvim_create_user_command("PiFollowUpMode", function(opts)
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
+  
+  local maint = require("pi.rpc.maintenance")
+  local mode = opts.args
+  
+  if mode == "" then
+    local current = require("pi.state").get("agent.follow_up_mode") or "one-at-a-time"
+    vim.notify("Pi: Follow-up mode: " .. current, vim.log.levels.INFO)
+    return
+  end
+  
+  if mode ~= "all" and mode ~= "one-at-a-time" then
+    vim.notify("Pi: Invalid mode. Use: all, one-at-a-time", vim.log.levels.ERROR)
+    return
+  end
+  
+  maint.set_follow_up_mode(client, mode, function(result)
+    if result and result.success then
+      vim.notify("Pi: Follow-up mode set to " .. mode, vim.log.levels.INFO)
+    else
+      vim.notify("Pi: Failed - " .. (result.error or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end, { nargs = "?", desc = "Set follow-up mode (all, one-at-a-time)" })
