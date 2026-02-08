@@ -88,7 +88,7 @@ function M:disconnect()
   end
   self.connected = false
   -- Reject all pending requests
-  for id, callback in pairs(self.pending) do
+  for _, callback in pairs(self.pending) do
     vim.schedule(function()
       callback({ error = "Disconnected" })
     end)
@@ -294,8 +294,7 @@ function M:_handle_message(message)
       )
       
     elseif event_type == "extension_ui_request" then
-      -- These need special handling - will be done in Phase 5
-      -- For now, just emit the event
+      -- Handled by pi.ui.extension module
     end
   end)
 end

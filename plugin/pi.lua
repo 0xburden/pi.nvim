@@ -111,6 +111,10 @@ end, { desc = "Reject pending change" })
 -- Session commands
 vim.api.nvim_create_user_command("PiSession", function()
   local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
   local session = require("pi.rpc.session")
   session.current(client, function(result)
     if result and result.success and result.data then
@@ -128,7 +132,6 @@ end, { desc = "Show current session info" })
 
 -- Debug command
 vim.api.nvim_create_user_command("PiDebug", function()
-  local events = require("pi.events")
   local state = require("pi.state")
   
   print("=== Pi Debug Info ===")
@@ -140,17 +143,10 @@ vim.api.nvim_create_user_command("PiDebug", function()
     print("  connected: " .. tostring(client.connected))
     print("  request_id: " .. tostring(client.request_id))
     print("  pending requests: " .. vim.tbl_count(client.pending))
+    print("  buffer size: " .. #client.buffer)
   end
+  print("Agent running: " .. tostring(state.get("agent.running")))
   print("Chat open: " .. tostring(state.get("ui.chat_open")))
-  
-  -- Show recent RPC log
-  local log_path = vim.fn.stdpath("cache") .. "/pi_rpc/debug.log"
-  print("\n=== RPC Log (last 20 lines) ===")
-  local lines = vim.fn.readfile(log_path)
-  local start_idx = math.max(1, #lines - 19)
-  for i = start_idx, #lines do
-    print(lines[i])
-  end
 end, { desc = "Debug Pi connection" })
 
 vim.api.nvim_create_user_command("PiTestRPC", function()
@@ -180,7 +176,7 @@ vim.api.nvim_create_user_command("PiTestOpen", function(opts)
   chat.open_file_in_other_window(filepath)
 end, { nargs = "?", complete = "file", desc = "Test opening file in other window" })
 
-vim.api.nvim_create_user_command("PiSessionNew", function(opts)
+vim.api.nvim_create_user_command("PiSessionNew", function()
   local client = require("pi.state").get("rpc_client")
   if not client then
     vim.notify("Pi: Not connected", vim.log.levels.ERROR)
@@ -360,7 +356,7 @@ vim.api.nvim_create_user_command("PiSessionFork", function(opts)
 end, { nargs = "?", desc = "Fork from a previous message (interactive if no ID given)" })
 
 -- Conversation commands
-vim.api.nvim_create_user_command("PiMessages", function(opts)
+vim.api.nvim_create_user_command("PiMessages", function()
   local client = require("pi.state").get("rpc_client")
   if not client then
     vim.notify("Pi: Not connected", vim.log.levels.ERROR)

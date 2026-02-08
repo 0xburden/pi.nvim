@@ -180,7 +180,7 @@ function M.handle_editor(request)
   
   -- Handle window close
   vim.api.nvim_create_autocmd("WinClosed", {
-    buffer = buf,
+    pattern = tostring(win),
     once = true,
     callback = function()
       if responded then return end
