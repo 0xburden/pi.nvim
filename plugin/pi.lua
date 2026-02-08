@@ -55,19 +55,8 @@ vim.api.nvim_create_user_command("PiLogs", function()
 end, { desc = "Toggle Pi logs viewer" })
 
 vim.api.nvim_create_user_command("PiChat", function()
-  local pi = require("pi")
-  if not require("pi.state").get("connected") then
-    pi.connect(function(success, err)
-      if success then
-        require("pi.ui.chat").toggle()
-      else
-        vim.notify("Pi: Failed to connect - " .. tostring(err), vim.log.levels.ERROR)
-      end
-    end)
-  else
-    require("pi.ui.chat").toggle()
-  end
-end, { desc = "Toggle Pi chat (auto-connects)" })
+  require("pi.ui.chat").toggle()
+end, { desc = "Toggle Pi chat" })
 
 vim.api.nvim_create_user_command("PiDiff", function(opts)
   local filepath = opts.args

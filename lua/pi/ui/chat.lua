@@ -258,10 +258,49 @@ function M.open()
     return
   end
 
-  -- Check if client is ready before opening
   local client = state.get("rpc_client")
+
+  -- Auto-connect if no client exists or not connected
   if not client or not client.connected then
-    vim.notify("Pi: Not connected. Use :PiConnect first", vim.log.levels.ERROR)
+    if not client then
+      -- Initialize client if it doesn't exist
+      local Client = require("pi.rpc.client")
+      client = Client.new()
+      state.update("rpc_client", client)
+    end
+
+    -- Show connecting message
+    vim.notify("Pi: Connecting...", vim.log.levels.INFO)
+
+    -- Open UI immediately with loading state
+    M._open_ui()
+    M._show_connecting_state()
+
+    -- Start connection
+    client:connect(function(success, err)
+      vim.schedule(function()
+        if success then
+          state.update("connected", true)
+          vim.notify("Pi: Connected", vim.log.levels.INFO)
+          M._clear_connecting_state()
+          M.load_history()
+        else
+          vim.notify("Pi: Connection failed - " .. tostring(err), vim.log.levels.ERROR)
+          M._show_connection_error(tostring(err or "Unknown error"))
+        end
+      end)
+    end)
+    return
+  end
+
+  -- Already connected - open UI and load history
+  M._open_ui()
+  M.load_history()
+end
+
+-- Open UI without loading history (used during connection)
+function M._open_ui()
+  if M.is_open() then
     return
   end
 
@@ -288,7 +327,6 @@ function M.open()
   vim.api.nvim_win_set_option(M.result_win, "foldcolumn", "0")
   vim.api.nvim_win_set_option(M.result_win, "colorcolumn", "")
 
-
   vim.cmd("belowright 3split")
   M.input_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(M.input_win, M.input_buf)
@@ -301,13 +339,55 @@ function M.open()
 
   M.setup_input_buffer()
   M.subscribe_to_events()
-  M.load_history()
 
   vim.api.nvim_set_current_win(M.input_win)
   vim.cmd("startinsert!")
 
   M.origin_win = origin_win
   state.update("ui.chat_open", true)
+end
+
+function M._show_connecting_state()
+  if not M.result_buf or not vim.api.nvim_buf_is_valid(M.result_buf) then
+    return
+  end
+  local lines = {
+    "",
+    "  Connecting to Pi...",
+    "",
+    "  Please wait while we establish a connection.",
+    "",
+  }
+  vim.api.nvim_buf_set_option(M.result_buf, "modifiable", true)
+  vim.api.nvim_buf_set_lines(M.result_buf, 0, -1, false, lines)
+  vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
+end
+
+function M._clear_connecting_state()
+  if not M.result_buf or not vim.api.nvim_buf_is_valid(M.result_buf) then
+    return
+  end
+  vim.api.nvim_buf_set_option(M.result_buf, "modifiable", true)
+  vim.api.nvim_buf_set_lines(M.result_buf, 0, -1, false, {})
+  vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
+end
+
+function M._show_connection_error(err)
+  if not M.result_buf or not vim.api.nvim_buf_is_valid(M.result_buf) then
+    return
+  end
+  local lines = {
+    "",
+    "  ⚠️  Connection failed",
+    "",
+    "  " .. err,
+    "",
+    "  Press 'q' to close, then try :PiChat again.",
+    "",
+  }
+  vim.api.nvim_buf_set_option(M.result_buf, "modifiable", true)
+  vim.api.nvim_buf_set_lines(M.result_buf, 0, -1, false, lines)
+  vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
 end
 
 function M.setup_input_buffer()
