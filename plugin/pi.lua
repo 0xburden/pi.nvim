@@ -337,3 +337,37 @@ vim.api.nvim_create_user_command("PiBashHistory", function()
     print(string.format("%d. [%s] %s%s", i, status, exec.command:sub(1, 60), truncated))
   end
 end, { desc = "Show bash execution history" })
+
+-- Extension UI commands
+vim.api.nvim_create_user_command("PiExtensionStatuses", function()
+  local extension = require("pi.ui.extension")
+  local statuses = extension.get_statuses()
+  
+  if vim.tbl_isempty(statuses) then
+    print("No extension statuses")
+    return
+  end
+  
+  print("=== Extension Statuses ===")
+  for key, text in pairs(statuses) do
+    print(string.format("  [%s] %s", key, text))
+  end
+end, { desc = "Show extension status entries" })
+
+vim.api.nvim_create_user_command("PiExtensionWidgets", function()
+  local extension = require("pi.ui.extension")
+  local widgets = extension.get_widgets()
+  
+  if vim.tbl_isempty(widgets) then
+    print("No extension widgets")
+    return
+  end
+  
+  print("=== Extension Widgets ===")
+  for key, widget in pairs(widgets) do
+    print(string.format("  [%s] (%s)", key, widget.placement))
+    for _, line in ipairs(widget.lines or {}) do
+      print("    " .. line)
+    end
+  end
+end, { desc = "Show extension widgets" })

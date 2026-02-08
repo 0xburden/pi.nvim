@@ -12,6 +12,9 @@ function M.setup(opts)
 
   M.state.update("rpc_client", client)
 
+  -- Set up extension UI handling
+  require("pi.ui.extension").setup()
+
   if M.config.get("auto_connect") then
     M.connect()
   end
