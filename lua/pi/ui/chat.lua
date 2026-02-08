@@ -59,15 +59,11 @@ local function setup_highlights()
   copy_highlight(diff_add_hl, DIFF_ADD_HL)
   copy_highlight(diff_del_hl, DIFF_DEL_HL)
 
-  local thinking_color = safe_get_highlight("Comment")
-  if thinking_color.foreground or thinking_color.background then
-    local tool_opts = {}
-    if thinking_color.foreground then tool_opts.fg = thinking_color.foreground end
-    if thinking_color.background then tool_opts.bg = thinking_color.background end
-    vim.api.nvim_set_hl(0, TOOL_RESULT_HL, tool_opts)
-  else
-    vim.api.nvim_set_hl(0, TOOL_RESULT_HL, { fg = thinking_color.foreground, bg = thinking_color.background })
-  end
+  local tool_hl = safe_get_highlight("Special")
+  vim.api.nvim_set_hl(0, TOOL_RESULT_HL, {
+    fg = tool_hl.foreground or comment_hl.foreground,
+    bg = tool_hl.background or comment_hl.background,
+  })
 end
 
 setup_highlights()
@@ -259,6 +255,13 @@ end
 -- Open chat interface
 function M.open()
   if M.is_open() then
+    return
+  end
+
+  -- Check if client is ready before opening
+  local client = state.get("rpc_client")
+  if not client or not client.connected then
+    vim.notify("Pi: Not connected. Use :PiConnect first", vim.log.levels.ERROR)
     return
   end
 
@@ -575,27 +578,6 @@ function M.append_to_thinking(text)
   end
 end
 
-function M.add_tool_call(tool)
-  local tool_name = tool.name or tool.tool or "unknown"
-  local args = tool.arguments or tool.args or {}
-  local filepath = args.file or args.path
-
-
-
-  local display_text
-  if filepath then
-    display_text = string.format("🔧 %s: %s", tool_name, filepath)
-  else
-    display_text = string.format("🔧 %s", tool_name)
-  end
-
-  M.add_message("tool", display_text, false)
-
-  if filepath and (tool_name == "edit" or tool_name == "write") then
-    queue_file_path(filepath)
-  end
-end
-
 function M.finalize_streaming_message()
   for i = #M.messages, 1, -1 do
     if M.messages[i].streaming then
@@ -612,7 +594,11 @@ function M.render()
 
   local lines = {}
   local highlights = {}
-  local width = math.max(40, (M.result_win and vim.api.nvim_win_is_valid(M.result_win)) and vim.api.nvim_win_get_width(M.result_win) - 4 or 40)
+
+  local width = 40
+  if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
+    width = math.max(40, vim.api.nvim_win_get_width(M.result_win) - 4)
+  end
   local function add_line(text, hl)
     table.insert(lines, text)
     if hl then
@@ -760,8 +746,12 @@ end
 
 function M.load_history()
   local client = state.get("rpc_client")
-  if not client then return end
+  if not client then
+    M.add_message("system", "Not connected to Pi agent", false)
+    return
+  end
 
+  -- Get state first
   client:request("get_state", { type = "get_state" }, function(state_result)
     vim.schedule(function()
       if state_result.success and state_result.data then
@@ -769,11 +759,17 @@ function M.load_history()
         if data.model then
           M.session_info.model = data.model.name or data.model.id or "Unknown"
         end
+      elseif state_result.error then
+        vim.notify("Pi: Failed to get state - " .. state_result.error, vim.log.levels.WARN)
       end
 
+      -- Always try to get messages even if state failed
       client:request("get_messages", { type = "get_messages" }, function(result)
         vim.schedule(function()
-          if result.error then return end
+          if result.error then
+            vim.notify("Pi: Failed to load messages - " .. result.error, vim.log.levels.WARN)
+            return
+          end
 
           local messages = result.data and result.data.messages or {}
           M.messages = {}

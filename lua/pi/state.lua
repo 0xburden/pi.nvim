@@ -46,17 +46,18 @@ M.state = {
 
 -- Update state and emit event
 function M.update(path, value)
-  -- Navigate nested path and update
   local keys = vim.split(path, ".", { plain = true })
   local current = M.state
-  
+
   for i = 1, #keys - 1 do
-    current = current[keys[i]]
+    local key = keys[i]
+    if type(current[key]) ~= "table" then
+      current[key] = {}
+    end
+    current = current[key]
   end
-  
+
   current[keys[#keys]] = value
-  
-  -- Emit state change event
   events.emit("state_updated", path, value)
 end
 

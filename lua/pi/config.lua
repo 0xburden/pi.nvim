@@ -3,8 +3,6 @@ local M = {}
 -- Default configuration
 local defaults = {
   -- Connection
-  host = "127.0.0.1",
-  port = 43863,
   auto_connect = false,
   
   -- UI

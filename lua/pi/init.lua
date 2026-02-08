@@ -8,10 +8,7 @@ function M.setup(opts)
   M.config.setup(opts or {})
 
   local Client = require("pi.rpc.client")
-  local client = Client.new({
-    host = M.config.get("host"),
-    port = M.config.get("port"),
-  })
+  local client = Client.new()
 
   M.state.update("rpc_client", client)
 
@@ -69,6 +66,10 @@ end
 
 function M._send_prompt(task)
   local client = M.state.get("rpc_client")
+  if not client then
+    vim.notify("Pi: Not connected", vim.log.levels.ERROR)
+    return
+  end
   client:request("prompt", { type = "prompt", message = task }, function(result)
     vim.schedule(function()
       if result.error then

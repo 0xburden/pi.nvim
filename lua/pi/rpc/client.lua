@@ -1,15 +1,12 @@
 local M = {}
 
-function M.new(opts)
+function M.new()
   local self = {
-    host = opts.host or "127.0.0.1",
-    port = opts.port or 43863,
     job_id = nil,
     connected = false,
     request_id = 0,
     pending = {},
     buffer = "",
-    on_event = nil,
   }
   setmetatable(self, { __index = M })
   return self
@@ -24,38 +21,21 @@ function M:connect(callback)
   end
 
   local cmd = { "pi", "--mode", "rpc", "--no-session" }
-  if self.port then
-    table.insert(cmd, "--rpc-port")
-    table.insert(cmd, tostring(self.port))
-  end
-
-  local client = self
 
   self.job_id = vim.fn.jobstart(cmd, {
     on_stdout = function(_, data, _)
       if data then
         for _, chunk in ipairs(data) do
-          if chunk ~= "" then
-            client:_handle_chunk(chunk)
+          if chunk and chunk ~= "" then
+            self:_handle_chunk(chunk)
           end
         end
       end
     end,
     on_stderr = function(_, data, _)
-      if data then
-        for _, line in ipairs(data) do
-          if line ~= "" then
-            vim.schedule(function()
-              vim.notify("Pi stderr: " .. line, vim.log.levels.WARN)
-            end)
-          end
-        end
-      end
+      -- Stderr is ignored - Pi may log there
     end,
-    on_exit = function(_, code, _)
-      vim.schedule(function()
-        vim.notify("Pi process exited with code " .. code, vim.log.levels.INFO)
-      end)
+    on_exit = function(_, _, _)
       self.job_id = nil
       self.connected = false
     end,
@@ -69,22 +49,56 @@ function M:connect(callback)
     return
   end
 
-  self.connected = true
+  -- Pi needs ~2 seconds to initialize before accepting commands
   vim.defer_fn(function()
-    callback(true)
-  end, 500)
+    self:_retry_connect(callback, vim.loop.now())
+  end, 2000)
+end
+
+function M:_retry_connect(final_callback, start_time)
+  local elapsed_ms = vim.loop.now() - start_time
+  local max_wait_ms = 60000
+
+  if elapsed_ms > max_wait_ms then
+    self:disconnect()
+    vim.schedule(function()
+      final_callback(false, "Timeout waiting for Pi RPC after 60s")
+    end)
+    return
+  end
+
+  self:request("get_state", { type = "get_state" }, function(result)
+    if result and result.success then
+      self.connected = true
+      vim.schedule(function()
+        final_callback(true)
+      end)
+    else
+      vim.defer_fn(function()
+        self:_retry_connect(final_callback, start_time)
+      end, 500)
+    end
+  end)
 end
 
 function M:disconnect()
   if self.job_id then
-    vim.fn.jobstop(self.job_id)
+    pcall(vim.fn.jobstop, self.job_id)
     self.job_id = nil
-    self.connected = false
   end
+  self.connected = false
+  -- Reject all pending requests
+  for id, callback in pairs(self.pending) do
+    vim.schedule(function()
+      callback({ error = "Disconnected" })
+    end)
+  end
+  self.pending = {}
+  self.buffer = ""
 end
 
 function M:request(method, params, callback)
-  if not self.connected or not self.job_id then
+  if not self.job_id then
     vim.schedule(function()
       callback({ error = "Not connected" })
     end)
@@ -99,27 +113,32 @@ function M:request(method, params, callback)
     id = id,
   }
   for k, v in pairs(params) do
-    if k ~= "type" then
+    -- Don't allow params to overwrite critical fields
+    if k ~= "type" and k ~= "id" then
       cmd[k] = v
     end
   end
 
   self.pending[id] = callback
 
+  -- Set up 30-second timeout
+  vim.defer_fn(function()
+    if self.pending[id] then
+      self.pending[id] = nil
+      vim.schedule(function()
+        callback({ error = "Timeout: " .. method })
+      end)
+    end
+  end, 30000)
+
   local json = vim.json.encode(cmd) .. "\n"
   vim.fn.chansend(self.job_id, json)
 end
 
-local function append_rpc_log(line)
-  local log_dir = vim.fn.stdpath("cache") .. "/pi_rpc"
-  local log_path = log_dir .. "/events.log"
-  vim.fn.mkdir(log_dir, "p")
-  local entry = string.format("[%s] %s", os.date("%Y-%m-%d %H:%M:%S"), line)
-  vim.fn.writefile({ entry }, log_path, "a")
-end
-
 function M:_handle_chunk(chunk)
   self.buffer = self.buffer .. chunk
+
+  -- Try to process newline-delimited messages
   while true do
     local newline = self.buffer:find("\n")
     if not newline then
@@ -129,35 +148,52 @@ function M:_handle_chunk(chunk)
     self.buffer = self.buffer:sub(newline + 1)
     line = line:gsub("\r$", "")
     if line ~= "" then
-      local client = self
-      vim.schedule(function()
-        client:_handle_line(line)
-      end)
+      self:_handle_line(line)
     end
+  end
+
+  -- If buffer has content without newline, try to parse as complete JSON
+  -- This handles Pi's RPC responses which may not end with newline
+  if self.buffer ~= "" then
+    local ok, message = pcall(vim.json.decode, self.buffer)
+    if ok and message then
+      self:_handle_message(message)
+      self.buffer = ""
+    end
+  end
+
+  -- Prevent unbounded buffer growth
+  if #self.buffer > 100000 then
+    self.buffer = self.buffer:sub(-50000)
   end
 end
 
 function M:_handle_line(line)
-  pcall(append_rpc_log, line)
   local ok, message = pcall(vim.json.decode, line)
   if not ok then
     return
   end
+  self:_handle_message(message)
+end
 
+function M:_handle_message(message)
   if message.type == "response" and message.id then
     local callback = self.pending[message.id]
     if callback then
       self.pending[message.id] = nil
-      if message.success then
-        callback({ success = true, data = message.data })
-      else
-        callback({ error = message.error or "Unknown error" })
-      end
+      vim.schedule(function()
+        if message.success then
+          callback({ success = true, data = message.data })
+        else
+          callback({ error = message.error or "Unknown error" })
+        end
+      end)
     end
   else
-    -- All non-response messages are events
     local events = require("pi.events")
-    events.emit("rpc_event", message)
+    vim.schedule(function()
+      events.emit("rpc_event", message)
+    end)
   end
 end
 

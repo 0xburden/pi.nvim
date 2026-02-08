@@ -38,9 +38,11 @@ end, { desc = "Stop/abort the agent" })
 vim.api.nvim_create_user_command("PiToggle", function()
   local pi = require("pi")
   if not require("pi.state").get("connected") then
-    pi.connect(function(success)
+    pi.connect(function(success, err)
       if success then
         require("pi.ui.control_panel").toggle()
+      else
+        vim.notify("Pi: Failed to connect - " .. tostring(err), vim.log.levels.ERROR)
       end
     end)
   else
@@ -55,9 +57,11 @@ end, { desc = "Toggle Pi logs viewer" })
 vim.api.nvim_create_user_command("PiChat", function()
   local pi = require("pi")
   if not require("pi.state").get("connected") then
-    pi.connect(function(success)
+    pi.connect(function(success, err)
       if success then
         require("pi.ui.chat").toggle()
+      else
+        vim.notify("Pi: Failed to connect - " .. tostring(err), vim.log.levels.ERROR)
       end
     end)
   else
@@ -106,21 +110,46 @@ vim.api.nvim_create_user_command("PiDebug", function()
   local state = require("pi.state")
   
   print("=== Pi Debug Info ===")
+  local client = state.get("rpc_client")
   print("Connected: " .. tostring(state.get("connected")))
-  print("Client: " .. (state.get("rpc_client") and "yes" or "no"))
+  print("Client exists: " .. (client and "yes" or "no"))
+  if client then
+    print("  job_id: " .. tostring(client.job_id))
+    print("  connected: " .. tostring(client.connected))
+    print("  request_id: " .. tostring(client.request_id))
+    print("  pending requests: " .. vim.tbl_count(client.pending))
+  end
   print("Chat open: " .. tostring(state.get("ui.chat_open")))
   
-  -- Subscribe to all events for 10 seconds
-  print("\nListening to events for 10 seconds...")
-  local unsub = events.on("rpc_event", function(evt)
-    print("Event: " .. vim.inspect(evt):sub(1, 200))
-  end)
+  -- Show recent RPC log
+  local log_path = vim.fn.stdpath("cache") .. "/pi_rpc/debug.log"
+  print("\n=== RPC Log (last 20 lines) ===")
+  local lines = vim.fn.readfile(log_path)
+  local start_idx = math.max(1, #lines - 19)
+  for i = start_idx, #lines do
+    print(lines[i])
+  end
+end, { desc = "Debug Pi connection" })
+
+vim.api.nvim_create_user_command("PiTestRPC", function()
+  local client = require("pi.state").get("rpc_client")
+  if not client then
+    vim.notify("No RPC client. Run :PiConnect first", vim.log.levels.ERROR)
+    return
+  end
   
-  vim.defer_fn(function()
-    unsub()
-    print("\nDebug session ended")
-  end, 10000)
-end, { desc = "Debug Pi events (10s capture)" })
+  vim.notify("Testing get_state...", vim.log.levels.INFO)
+  client:request("get_state", { type = "get_state" }, function(result)
+    vim.schedule(function()
+      if result.success then
+        vim.notify("RPC test SUCCESS", vim.log.levels.INFO)
+        print(vim.inspect(result.data):sub(1, 500))
+      else
+        vim.notify("RPC test FAILED: " .. tostring(result.error), vim.log.levels.ERROR)
+      end
+    end)
+  end)
+end, { desc = "Test RPC connection" })
 
 -- Test file opening
 vim.api.nvim_create_user_command("PiTestOpen", function(opts)
