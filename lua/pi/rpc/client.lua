@@ -177,6 +177,10 @@ function M:_handle_line(line)
 end
 
 function M:_handle_message(message)
+  local events = require("pi.events")
+  local state = require("pi.state")
+  
+  -- Handle responses to our requests
   if message.type == "response" and message.id then
     local callback = self.pending[message.id]
     if callback then
@@ -189,12 +193,122 @@ function M:_handle_message(message)
         end
       end)
     end
-  else
-    local events = require("pi.events")
-    vim.schedule(function()
-      events.emit("rpc_event", message)
-    end)
+    return
   end
+  
+  -- Handle typed events from Pi
+  vim.schedule(function()
+    local event_type = message.type
+    
+    -- Always emit the raw event for backward compatibility
+    events.emit("rpc_event", message)
+    
+    -- Emit typed event if it has a type
+    if event_type then
+      events.emit(event_type, message)
+    end
+    
+    -- Update state based on event type
+    if event_type == "agent_start" then
+      state.update("agent.running", true)
+      
+    elseif event_type == "agent_end" then
+      state.update("agent.running", false)
+      -- Store the messages from this run
+      if message.messages then
+        local conv_messages = state.get("conversation.messages") or {}
+        for _, msg in ipairs(message.messages) do
+          table.insert(conv_messages, msg)
+        end
+        state.update("conversation.messages", conv_messages)
+      end
+      
+    elseif event_type == "message_start" then
+      state.update("agent.current_message", message.message)
+      
+    elseif event_type == "message_update" then
+      state.update("agent.current_message", message.message)
+      -- Also emit the specific delta type for fine-grained handling
+      local delta = message.assistantMessageEvent
+      if delta and delta.type then
+        events.emit("message_delta_" .. delta.type, {
+          message = message.message,
+          delta = delta,
+        })
+      end
+      
+    elseif event_type == "message_end" then
+      state.update("agent.current_message", nil)
+      state.update("agent.last_message", message.message)
+      
+    elseif event_type == "tool_execution_start" then
+      state.update("agent.current_tool", {
+        id = message.toolCallId,
+        name = message.toolName,
+        args = message.args,
+      })
+      
+    elseif event_type == "tool_execution_update" then
+      local current = state.get("agent.current_tool") or {}
+      current.partial_result = message.partialResult
+      state.update("agent.current_tool", current)
+      
+    elseif event_type == "tool_execution_end" then
+      state.update("agent.current_tool", nil)
+      state.update("agent.last_tool_result", {
+        id = message.toolCallId,
+        name = message.toolName,
+        result = message.result,
+        is_error = message.isError,
+      })
+      
+    elseif event_type == "auto_compaction_start" then
+      state.update("agent.compacting", true)
+      state.update("agent.compaction_reason", message.reason)
+      
+    elseif event_type == "auto_compaction_end" then
+      state.update("agent.compacting", false)
+      state.update("agent.compaction_reason", nil)
+      if message.result then
+        state.update("agent.last_compaction", message.result)
+      end
+      
+    elseif event_type == "auto_retry_start" then
+      state.update("agent.retrying", true)
+      state.update("agent.retry_info", {
+        attempt = message.attempt,
+        max_attempts = message.maxAttempts,
+        delay_ms = message.delayMs,
+        error = message.errorMessage,
+      })
+      
+    elseif event_type == "auto_retry_end" then
+      state.update("agent.retrying", false)
+      state.update("agent.retry_info", nil)
+      
+    elseif event_type == "extension_error" then
+      -- Log extension errors
+      vim.notify(
+        string.format("Pi extension error [%s]: %s", message.event or "?", message.error or "unknown"),
+        vim.log.levels.WARN
+      )
+      
+    elseif event_type == "extension_ui_request" then
+      -- These need special handling - will be done in Phase 5
+      -- For now, just emit the event
+    end
+  end)
+end
+
+--- Send a raw message to Pi (for extension UI responses, etc.)
+-- @param message table The message to send
+function M:send(message)
+  if not self.job_id then
+    return false, "Not connected"
+  end
+  local json = vim.json.encode(message) .. "\n"
+  vim.fn.chansend(self.job_id, json)
+  return true
 end
 
 return M

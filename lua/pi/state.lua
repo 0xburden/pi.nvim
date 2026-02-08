@@ -22,6 +22,18 @@ M.state = {
     auto_compaction = true,
     steering_mode = "one-at-a-time",
     follow_up_mode = "one-at-a-time",
+    -- Streaming state
+    current_message = nil,    -- Message being streamed
+    last_message = nil,       -- Last completed message
+    current_tool = nil,       -- Tool currently executing
+    last_tool_result = nil,   -- Last tool execution result
+    -- Compaction state
+    compacting = false,
+    compaction_reason = nil,
+    last_compaction = nil,
+    -- Retry state
+    retrying = false,
+    retry_info = nil,
   },
   
   -- Conversation
