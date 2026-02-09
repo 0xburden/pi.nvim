@@ -2,13 +2,13 @@ local M = {}
 
 local commands_mod = require("pi.rpc.commands")
 local state = require("pi.state")
-local events = require("pi.events")
 
 local is_selecting = false
 
 local function ensure_client(callback)
   local client = state.get("rpc_client")
-  if client and client.connected then
+  local is_connected = state.get("connected") == true or (client and client.connected)
+  if is_connected and client then
     callback(client)
     return
   end
@@ -16,6 +16,7 @@ local function ensure_client(callback)
   vim.schedule(function()
     vim.notify("Pi: Not connected", vim.log.levels.ERROR)
   end)
+  is_selecting = false
 end
 
 local function ensure_commands(callback)
