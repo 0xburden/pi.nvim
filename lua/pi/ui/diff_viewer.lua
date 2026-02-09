@@ -1,10 +1,19 @@
 local state = require("pi.state")
+local colors = require("pi.ui.colors")
 
 local M = {}
 M.buf_left = nil   -- Before buffer
 M.buf_right = nil  -- After buffer
 M.win_left = nil
 M.win_right = nil
+
+local DIFF_NS = vim.api.nvim_create_namespace("pi_diff_viewer")
+local function setup_highlights()
+  colors.apply_highlight("PiDiffViewerTitle", { fg_link = "Title", bold = true })
+  colors.apply_highlight("PiDiffViewerContent", { bg = colors.get_code_bg() })
+end
+
+setup_highlights()
 
 -- Show diff for a file
 -- @param filepath string: Path to file
@@ -36,6 +45,9 @@ function M.show(filepath, after_content)
   
   vim.api.nvim_buf_set_lines(M.buf_left, 0, -1, false, before_content)
   vim.api.nvim_buf_set_lines(M.buf_right, 0, -1, false, after_lines)
+
+  vim.api.nvim_buf_add_highlight(M.buf_left, DIFF_NS, "PiDiffViewerTitle", 0, 0, -1)
+  vim.api.nvim_buf_add_highlight(M.buf_right, DIFF_NS, "PiDiffViewerTitle", 0, 0, -1)
   
   vim.api.nvim_buf_set_name(M.buf_left, "Before: " .. filepath)
   vim.api.nvim_buf_set_name(M.buf_right, "After: " .. filepath)
@@ -48,10 +60,12 @@ function M.show(filepath, after_content)
   vim.cmd("vsplit")
   M.win_left = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(M.win_left, M.buf_left)
+  vim.api.nvim_win_set_option(M.win_left, "winhl", "Normal:PiDiffViewerContent")
   
   vim.cmd("wincmd l")
   M.win_right = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(M.win_right, M.buf_right)
+  vim.api.nvim_win_set_option(M.win_right, "winhl", "Normal:PiDiffViewerContent")
   
   -- Enable diff mode
   vim.cmd("windo diffthis")
