@@ -63,11 +63,19 @@ Default configuration: >lua
         respect_colorscheme = true,
         respect_user_highlights = true,
         custom_highlights = {},
+        streaming_prompt_default = "follow_up", -- follow_up, steer, block
+        show_tool_streaming = true,
+        show_retry_status = true,
+        show_compaction_status = true,
+        extension_status_panel = true,
+        allow_image_attachments = true,
       },
       
       keymaps = {
         toggle_panel = "<leader>pt",
         toggle_logs = "<leader>pl",
+        toggle_chat = "<leader>pc",
+        attach_image = "<leader>pI",
         approve = "<leader>pa",
         reject = "<leader>pr",
       }
@@ -107,6 +115,9 @@ COMMANDS                                                         *pi-commands|
 :PiChat                                                           *:PiChat*
     Open the chat interface for streaming responses
 
+:PiChatAttach [file]                                      *:PiChatAttach*
+    Attach an image (png/jpeg) to the next chat prompt
+
 :PiDiff [file]                                                    *:PiDiff*
     Show diff for file (defaults to current file)
 
@@ -145,6 +156,15 @@ Use `ui.autocomplete_fuzzy`, `ui.autocomplete_max_items`, and
 `ui.autocomplete_enabled` to tweak the inline palette behavior. The
 `:PiPalette` command exposes a global command list (Ctrl+P style) to run any Pi
 extension/prompt/skill regardless of the current slash input.
+
+When `ui.allow_image_attachments` is enabled, press `Ctrl+g` in the chat input
+(or run `:PiChatAttach`) to attach png/jpeg images to the next prompt. Pending
+attachments are shown in the chat status line and rendered as placeholders once
+sent.
+
+If the agent is already streaming, the chat submit flow will prompt you to
+steer immediately or queue a follow-up (configurable via
+`ui.streaming_prompt_default`).
 
 ===============================================================================
 API                                                                   *:pi-api|

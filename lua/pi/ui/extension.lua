@@ -10,6 +10,299 @@ local events = require("pi.events")
 -- Track if we've set up event listeners
 M._setup_done = false
 
+local function update_footer(win, text)
+  if not win or not vim.api.nvim_win_is_valid(win) then
+    return
+  end
+  local config = vim.api.nvim_win_get_config(win)
+  config.footer = text
+  config.footer_pos = "center"
+  vim.api.nvim_win_set_config(win, config)
+end
+
+local function start_countdown(timeout_ms, on_tick, on_timeout)
+  if not timeout_ms or timeout_ms <= 0 then
+    return nil
+  end
+
+  local remaining = math.ceil(timeout_ms / 1000)
+  local timer = vim.loop.new_timer()
+
+  local function stop()
+    if timer then
+      timer:stop()
+      timer:close()
+      timer = nil
+    end
+  end
+
+  if on_tick then
+    vim.schedule(function()
+      on_tick(remaining)
+    end)
+  end
+
+  timer:start(1000, 1000, function()
+    remaining = remaining - 1
+    if remaining <= 0 then
+      stop()
+      if on_timeout then
+        vim.schedule(on_timeout)
+      end
+    elseif on_tick then
+      vim.schedule(function()
+        on_tick(remaining)
+      end)
+    end
+  end)
+
+  return stop
+end
+
+local function max_display_width(lines)
+  local max_width = 0
+  for _, line in ipairs(lines) do
+    max_width = math.max(max_width, vim.fn.strdisplaywidth(line))
+  end
+  return max_width
+end
+
+local function open_choice_window(request, items, on_choice)
+  local title = request.title or "Select"
+  local lines = { title }
+
+  if request.message then
+    for _, line in ipairs(vim.split(request.message, "\n")) do
+      table.insert(lines, line)
+    end
+  end
+
+  table.insert(lines, "")
+  local option_start = #lines + 1
+
+  local function item_label(item)
+    if type(item) == "table" then
+      return item.label or item.name or item.title or tostring(item)
+    end
+    return tostring(item)
+  end
+
+  for i, item in ipairs(items) do
+    table.insert(lines, string.format("%d. %s", i, item_label(item)))
+  end
+
+  if #items == 0 then
+    table.insert(lines, "(no options)")
+  end
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].modifiable = false
+
+  local width = math.min(max_display_width(lines) + 4, vim.o.columns - 4)
+  local height = math.min(#lines + 2, vim.o.lines - 4)
+  local row = math.floor((vim.o.lines - height) / 2)
+  local col = math.floor((vim.o.columns - width) / 2)
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = "minimal",
+    border = "rounded",
+    title = " " .. title .. " ",
+    title_pos = "center",
+  })
+
+  local responded = false
+  local selected = 1
+  local ns = vim.api.nvim_create_namespace("pi_extension_select")
+  local stop_timer
+
+  local function highlight_selection()
+    vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    if #items == 0 then
+      return
+    end
+    local line = option_start + selected - 1
+    vim.api.nvim_buf_add_highlight(buf, ns, "Visual", line - 1, 0, -1)
+  end
+
+  local function finish(choice)
+    if responded then
+      return
+    end
+    responded = true
+    if stop_timer then stop_timer() end
+    if win and vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+    on_choice(choice)
+  end
+
+  local footer_base = " <CR> select | q cancel "
+  stop_timer = start_countdown(request.timeout, function(remaining)
+    update_footer(win, footer_base .. string.format("| timeout %ds ", remaining))
+  end, function()
+    finish(nil)
+  end)
+
+  if not stop_timer then
+    update_footer(win, footer_base)
+  end
+
+  vim.keymap.set("n", "q", function()
+    if stop_timer then stop_timer() end
+    finish(nil)
+  end, { buffer = buf, silent = true })
+
+  vim.keymap.set("n", "<Esc>", function()
+    if stop_timer then stop_timer() end
+    finish(nil)
+  end, { buffer = buf, silent = true })
+
+  vim.keymap.set("n", "j", function()
+    if #items == 0 then return end
+    selected = math.min(selected + 1, #items)
+    highlight_selection()
+  end, { buffer = buf, silent = true })
+
+  vim.keymap.set("n", "k", function()
+    if #items == 0 then return end
+    selected = math.max(selected - 1, 1)
+    highlight_selection()
+  end, { buffer = buf, silent = true })
+
+  vim.keymap.set("n", "<Down>", function()
+    if #items == 0 then return end
+    selected = math.min(selected + 1, #items)
+    highlight_selection()
+  end, { buffer = buf, silent = true })
+
+  vim.keymap.set("n", "<Up>", function()
+    if #items == 0 then return end
+    selected = math.max(selected - 1, 1)
+    highlight_selection()
+  end, { buffer = buf, silent = true })
+
+  vim.keymap.set("n", "<CR>", function()
+    if stop_timer then stop_timer() end
+    local choice = items[selected]
+    finish(choice)
+  end, { buffer = buf, silent = true })
+
+  for i = 1, #items do
+    vim.keymap.set("n", tostring(i), function()
+      if stop_timer then stop_timer() end
+      finish(items[i])
+    end, { buffer = buf, silent = true })
+  end
+
+  vim.api.nvim_create_autocmd("WinClosed", {
+    pattern = tostring(win),
+    once = true,
+    callback = function()
+      if responded then return end
+      responded = true
+      if stop_timer then stop_timer() end
+      on_choice(nil)
+    end,
+  })
+
+  highlight_selection()
+end
+
+local function open_input_window(request, on_submit)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].buftype = "prompt"
+  vim.bo[buf].bufhidden = "wipe"
+
+  local prompt_base = request.title or "Input"
+  local function update_prompt(remaining)
+    local suffix = remaining and string.format(" (%ds)", remaining) or ""
+    vim.fn.prompt_setprompt(buf, prompt_base .. suffix .. ": ")
+  end
+
+  local responded = false
+  local win
+  local stop_timer
+
+  local function finish(value)
+    if responded then
+      return
+    end
+    responded = true
+    if stop_timer then stop_timer() end
+    if win and vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+    on_submit(value)
+  end
+
+  vim.fn.prompt_setcallback(buf, function(input)
+    finish(input)
+  end)
+
+  vim.fn.prompt_setinterrupt(buf, function()
+    finish(nil)
+  end)
+
+  if request.placeholder then
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { request.placeholder })
+  end
+
+  local width = math.min(math.max(40, #prompt_base + 10), vim.o.columns - 4)
+  local height = 3
+  local row = math.floor((vim.o.lines - height) / 2)
+  local col = math.floor((vim.o.columns - width) / 2)
+
+  win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = "minimal",
+    border = "rounded",
+    title = " " .. prompt_base .. " ",
+    title_pos = "center",
+  })
+
+  local footer_base = " <Enter> submit | <Esc> cancel "
+  stop_timer = start_countdown(request.timeout, function(remaining)
+    update_prompt(remaining)
+    update_footer(win, footer_base .. string.format("| timeout %ds ", remaining))
+  end, function()
+    finish(nil)
+  end)
+
+  if not stop_timer then
+    update_prompt(nil)
+    update_footer(win, footer_base)
+  end
+
+  vim.keymap.set("i", "<Esc>", function()
+    if stop_timer then stop_timer() end
+    finish(nil)
+  end, { buffer = buf, silent = true })
+
+  vim.api.nvim_create_autocmd("WinClosed", {
+    pattern = tostring(win),
+    once = true,
+    callback = function()
+      if responded then return end
+      responded = true
+      if stop_timer then stop_timer() end
+      on_submit(nil)
+    end,
+  })
+
+  vim.cmd("startinsert")
+end
+
 --- Initialize extension UI handling
 function M.setup()
   if M._setup_done then return end
@@ -52,11 +345,9 @@ end
 -- @param request table { id, title, options, timeout? }
 function M.handle_select(request)
   local items = request.options or {}
-  
-  vim.ui.select(items, {
-    prompt = request.title or "Select:",
-  }, function(choice)
-    if choice then
+
+  open_choice_window(request, items, function(choice)
+    if choice ~= nil then
       M.send_response(request.id, { value = choice })
     else
       M.send_response(request.id, { cancelled = true })
@@ -67,14 +358,7 @@ end
 --- Handle confirm dialog - yes/no confirmation
 -- @param request table { id, title, message?, timeout? }
 function M.handle_confirm(request)
-  local prompt = request.title or "Confirm"
-  if request.message then
-    prompt = prompt .. "\n" .. request.message
-  end
-  
-  vim.ui.select({ "Yes", "No" }, {
-    prompt = prompt,
-  }, function(choice)
+  open_choice_window(request, { "Yes", "No" }, function(choice)
     if choice == "Yes" then
       M.send_response(request.id, { confirmed = true })
     elseif choice == "No" then
@@ -88,10 +372,7 @@ end
 --- Handle input dialog - free-form text input
 -- @param request table { id, title?, placeholder? }
 function M.handle_input(request)
-  vim.ui.input({
-    prompt = request.title or "Input: ",
-    default = request.placeholder or "",
-  }, function(input)
+  open_input_window(request, function(input)
     if input ~= nil then
       M.send_response(request.id, { value = input })
     else
@@ -138,6 +419,28 @@ function M.handle_editor(request)
   
   -- Track if we've sent a response
   local responded = false
+  local stop_timer
+
+  local function finish(response)
+    if responded then return end
+    responded = true
+    if stop_timer then stop_timer() end
+    M.send_response(request.id, response)
+    if win and vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end
+
+  local footer_base = " <C-s> submit | <Esc> cancel "
+  stop_timer = start_countdown(request.timeout, function(remaining)
+    update_footer(win, footer_base .. string.format("| timeout %ds ", remaining))
+  end, function()
+    finish({ cancelled = true })
+  end)
+
+  if not stop_timer then
+    update_footer(win, footer_base)
+  end
   
   -- Submit on Ctrl+S or :w
   vim.api.nvim_buf_set_name(buf, "pi-extension-editor")
@@ -145,11 +448,8 @@ function M.handle_editor(request)
     buffer = buf,
     once = true,
     callback = function()
-      if responded then return end
-      responded = true
       local content = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-      M.send_response(request.id, { value = content })
-      vim.api.nvim_win_close(win, true)
+      finish({ value = content })
     end,
   })
   
@@ -165,17 +465,11 @@ function M.handle_editor(request)
   
   -- Cancel on Escape or close
   vim.keymap.set("n", "<Esc>", function()
-    if responded then return end
-    responded = true
-    M.send_response(request.id, { cancelled = true })
-    vim.api.nvim_win_close(win, true)
+    finish({ cancelled = true })
   end, { buffer = buf, silent = true })
   
   vim.keymap.set("n", "q", function()
-    if responded then return end
-    responded = true
-    M.send_response(request.id, { cancelled = true })
-    vim.api.nvim_win_close(win, true)
+    finish({ cancelled = true })
   end, { buffer = buf, silent = true })
   
   -- Handle window close
@@ -185,6 +479,7 @@ function M.handle_editor(request)
     callback = function()
       if responded then return end
       responded = true
+      if stop_timer then stop_timer() end
       M.send_response(request.id, { cancelled = true })
     end,
   })

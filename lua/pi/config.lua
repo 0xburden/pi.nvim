@@ -33,12 +33,24 @@ local defaults = {
     respect_colorscheme = true,
     respect_user_highlights = true,
     custom_highlights = {},
+
+    -- Streaming behavior
+    streaming_prompt_default = "follow_up", -- "follow_up", "steer", or "block"
+    show_tool_streaming = true,
+    show_retry_status = true,
+    show_compaction_status = true,
+
+    -- Extensions/UI extras
+    extension_status_panel = true,
+    allow_image_attachments = true,
   },
 
   -- Keymaps
   keymaps = {
     toggle_panel = "<leader>pt",
     toggle_logs = "<leader>pl",
+    toggle_chat = "<leader>pc",
+    attach_image = "<leader>pI",
     approve = "<leader>pa",
     reject = "<leader>pr",
   }
@@ -66,6 +78,14 @@ function M.setup_keymaps()
 
   if maps.toggle_logs then
     vim.keymap.set("n", maps.toggle_logs, "<cmd>PiLogs<cr>", { desc = "Toggle Pi logs" })
+  end
+
+  if maps.toggle_chat then
+    vim.keymap.set("n", maps.toggle_chat, "<cmd>PiChat<cr>", { desc = "Toggle Pi chat" })
+  end
+
+  if maps.attach_image then
+    vim.keymap.set("n", maps.attach_image, "<cmd>PiChatAttach<cr>", { desc = "Attach image to Pi chat" })
   end
 
   if maps.approve then

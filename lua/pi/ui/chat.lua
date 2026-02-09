@@ -4,6 +4,7 @@ local config = require("pi.config")
 local commands = require("pi.rpc.commands")
 local autocomplete = require("pi.ui.autocomplete")
 local colors = require("pi.ui.colors")
+local image_utils = require("pi.util.images")
 
 local M = {}
 local commands_loading = false
@@ -149,6 +150,8 @@ M.session_info = {
 -- Pending file paths to open after edits
 M.pending_file_paths = {}
 M.tool_call_context = {}
+M.tool_streams = {}
+M.pending_images = {}
 M.tool_spinner_active = false
 M.tool_spinner_label = nil
 M.spinner_frames = { "⠋", "⠙", "⠚", "⠞", "⠖", "⠦", "⠴", "⠲", "⠳", "⠓" }
@@ -203,6 +206,32 @@ local function queue_text_path(text)
   end
 end
 
+local function build_image_payloads(images)
+  local payloads = {}
+  local display = {}
+  for _, image in ipairs(images) do
+    table.insert(payloads, { data = image.data, mimeType = image.mimeType })
+    table.insert(display, { path = image.path, mimeType = image.mimeType })
+  end
+  return payloads, display
+end
+
+local function collect_pending_images()
+  if #M.pending_images == 0 then
+    return nil, nil
+  end
+  local payloads, display = build_image_payloads(M.pending_images)
+  M.pending_images = {}
+  return payloads, display
+end
+
+local function format_image_label(image)
+  if type(image) == "string" then
+    return image
+  end
+  return image.path or image.file or image.uri or "(image)"
+end
+
 local function register_tool_call_context(tool)
   local id = tool.id or tool.toolCallId
   if not id then
@@ -220,6 +249,188 @@ local function register_tool_call_context(tool)
     entry.command = command
   end
   M.tool_call_context[id] = entry
+end
+
+local function format_tool_label(tool_name, args)
+  local label = tool_name or "tool"
+  local parts = {}
+  if args then
+    if args.command then table.insert(parts, args.command) end
+    if args.file then table.insert(parts, args.file) end
+    if args.path then table.insert(parts, args.path) end
+    if args.filepath then table.insert(parts, args.filepath) end
+  end
+  if #parts > 0 then
+    label = string.format("%s (%s)", label, table.concat(parts, ", "))
+  end
+  return label
+end
+
+local function safe_encode(value)
+  if value == nil then
+    return ""
+  end
+  if type(value) == "string" then
+    return value
+  end
+  if type(value) == "table" then
+    local ok, encoded = pcall(vim.json.encode, value)
+    if ok then
+      return encoded
+    end
+  end
+  return tostring(value)
+end
+
+local function format_tool_result_text(result, meta)
+  local text = ""
+  if type(result) == "string" then
+    text = result
+  elseif type(result) == "table" then
+    if result.output then
+      text = result.output
+    elseif result.diff then
+      text = result.diff
+    elseif result.result then
+      text = safe_encode(result.result)
+    else
+      text = safe_encode(result)
+    end
+  elseif result ~= nil then
+    text = tostring(result)
+  end
+
+  local truncated = meta and (meta.truncated or (type(result) == "table" and result.truncated))
+  local full_path = meta and (meta.fullOutputPath or (type(result) == "table" and result.fullOutputPath))
+  if truncated or full_path then
+    local notes = {}
+    if truncated then
+      table.insert(notes, "truncated")
+    end
+    if full_path then
+      table.insert(notes, "full output: " .. full_path)
+    end
+    local note = "(" .. table.concat(notes, ", ") .. ")"
+    if text ~= "" then
+      text = text .. "\n\n" .. note
+    else
+      text = note
+    end
+  end
+
+  if text == "" then
+    text = "(no output)"
+  end
+  return text
+end
+
+local function format_partial_text(partial)
+  if partial == nil then
+    return nil
+  end
+  if type(partial) == "string" then
+    return partial
+  end
+  if type(partial) == "table" then
+    if partial.output then
+      return partial.output
+    end
+    return safe_encode(partial)
+  end
+  return tostring(partial)
+end
+
+local function ensure_tool_stream(tool_id, tool_name, args)
+  if not tool_id then
+    return nil
+  end
+  local stream = M.tool_streams[tool_id]
+  if not stream then
+    local header = string.format("Running %s", format_tool_label(tool_name, args))
+    M.add_message("tool", header, false, { tool_id = tool_id, tool_name = tool_name })
+    stream = {
+      header_index = #M.messages,
+      output_index = nil,
+      name = tool_name,
+      args = args,
+      partial = "",
+      finalized = false,
+    }
+    M.tool_streams[tool_id] = stream
+  end
+  return stream
+end
+
+local function update_tool_stream_output(tool_id, tool_name, args, text, is_final, opts)
+  local stream = ensure_tool_stream(tool_id, tool_name, args)
+  if not stream then
+    return
+  end
+  if not stream.output_index then
+    M.add_message("tool_result", text, not is_final, {
+      tool_id = tool_id,
+      tool_name = tool_name,
+      is_error = opts and opts.is_error,
+    })
+    stream.output_index = #M.messages
+  else
+    local entry = M.messages[stream.output_index]
+    if entry then
+      entry.content = text
+      entry.streaming = not is_final
+      entry.is_error = opts and opts.is_error
+    end
+  end
+  stream.finalized = is_final or stream.finalized
+end
+
+local function append_tool_stream_partial(tool_id, tool_name, args, partial, opts)
+  local stream = ensure_tool_stream(tool_id, tool_name, args)
+  if not stream then
+    return
+  end
+  local chunk = format_partial_text(partial)
+  if not chunk or chunk == "" then
+    return
+  end
+  stream.partial = (stream.partial or "") .. chunk
+  update_tool_stream_output(tool_id, tool_name, args, stream.partial, false, opts)
+end
+
+local function handle_tool_result_metadata(tool_name, result, args)
+  local filepath = nil
+  if args then
+    filepath = args.file or args.path or args.filepath
+  end
+  if not filepath and result and type(result) == "table" then
+    filepath = result.file or result.path or result.filepath
+  end
+
+  if filepath and (tool_name == "edit" or tool_name == "write") then
+    queue_file_path(filepath)
+  end
+
+  if result then
+    if not filepath then
+      local candidate = type(result) == "table" and (result.diff or result.output) or result
+      local extracted = extract_path_from_text(candidate)
+      if extracted then
+        queue_file_path(extracted)
+      end
+    end
+
+    if type(result) == "table" then
+      if result.diff then
+        queue_text_path(result.diff)
+      elseif result.output then
+        queue_text_path(result.output)
+      end
+    else
+      queue_text_path(result)
+    end
+  end
+
+  return filepath
 end
 
 local function stop_spinner_animation()
@@ -246,11 +457,7 @@ local function start_spinner_animation()
 end
 
 local function start_tool_spinner(tool)
-  local label = tool.name or tool.tool or "tool"
-  local args = tool.arguments or tool.args or {}
-  if args.command then
-    label = string.format("%s (%s)", label, args.command)
-  end
+  local label = format_tool_label(tool.name or tool.tool, tool.arguments or tool.args or {})
   M.tool_spinner_label = label
   M.tool_spinner_active = true
   if not M.spinner_index or M.spinner_index < 1 then
@@ -490,6 +697,12 @@ function M.setup_input_buffer()
   vim.keymap.set("n", "q", "<cmd>PiChat<CR>", { buffer = M.result_buf, silent = true })
   vim.keymap.set("i", "<S-CR>", "<CR>", { buffer = M.input_buf, silent = true })
 
+  if config.get("ui.allow_image_attachments") ~= false then
+    vim.keymap.set({ "n", "i" }, "<C-g>", function()
+      M.attach_image()
+    end, { buffer = M.input_buf, silent = true, desc = "Attach image" })
+  end
+
   if autocomplete_enabled then
     local termcodes = vim.api.nvim_replace_termcodes
 
@@ -555,6 +768,12 @@ function M.setup_input_buffer()
   })
 end
 
+local function clear_input_buffer()
+  if M.input_buf and vim.api.nvim_buf_is_valid(M.input_buf) then
+    vim.api.nvim_buf_set_lines(M.input_buf, 0, -1, false, { "" })
+  end
+end
+
 function M.submit()
   if not M.input_buf or not vim.api.nvim_buf_is_valid(M.input_buf) then
     return
@@ -569,8 +788,91 @@ function M.submit()
     return
   end
 
-  M.send_message(text)
-  vim.api.nvim_buf_set_lines(M.input_buf, 0, -1, false, { "" })
+  local function do_send(opts)
+    local sent = M.send_message(text, opts)
+    if sent then
+      clear_input_buffer()
+    end
+  end
+
+  if M.is_streaming then
+    M.handle_streaming_submit(text, do_send)
+    return
+  end
+
+  do_send(nil)
+end
+
+function M.attach_image(path)
+  if config.get("ui.allow_image_attachments") == false then
+    vim.notify("Pi: Image attachments disabled", vim.log.levels.WARN)
+    return
+  end
+
+  if not M.is_open() then
+    vim.notify("Pi: Chat is not open", vim.log.levels.WARN)
+    return
+  end
+
+  if not path or path == "" then
+    vim.ui.input({ prompt = "Attach image (png/jpeg): " }, function(input)
+      if input and input ~= "" then
+        M.attach_image(input)
+      end
+    end)
+    return
+  end
+
+  local expanded = vim.fn.expand(path)
+  if vim.fn.filereadable(expanded) == 0 then
+    vim.notify("Pi: Image not found: " .. expanded, vim.log.levels.ERROR)
+    return
+  end
+
+  local encoded, err = image_utils.encode_image(expanded)
+  if not encoded then
+    vim.notify("Pi: Failed to attach image - " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+
+  table.insert(M.pending_images, encoded)
+  vim.notify("Pi: Attached image " .. expanded, vim.log.levels.INFO)
+  M.render()
+end
+
+function M.handle_streaming_submit(text, callback)
+  local default = config.get("ui.streaming_prompt_default") or "follow_up"
+  local behavior
+
+  if default == "steer" then
+    behavior = "steer"
+  elseif default == "follow_up" or default == "followUp" then
+    behavior = "followUp"
+  end
+
+  if default ~= "block" and behavior then
+    vim.notify("Pi: Agent is streaming - sending as " .. (behavior == "steer" and "steer" or "follow-up"), vim.log.levels.INFO)
+    callback({ streamingBehavior = behavior })
+    return
+  end
+
+  local options = {
+    { label = "Steer now", behavior = "steer" },
+    { label = "Queue follow-up", behavior = "followUp" },
+    { label = "Cancel", behavior = nil },
+  }
+
+  vim.ui.select(options, {
+    prompt = "Agent is streaming. Choose delivery:",
+    format_item = function(item)
+      return item.label
+    end,
+  }, function(choice)
+    if not choice or not choice.behavior then
+      return
+    end
+    callback({ streamingBehavior = choice.behavior })
+  end)
 end
 
 function M.handle_text_change()
@@ -743,7 +1045,109 @@ function M.handle_event(event)
     M.current_thinking = ""
     M.pending_file_paths = {}
     M.tool_call_context = {}
+    M.tool_streams = {}
     stop_tool_spinner()
+
+  elseif event_type == "turn_start" then
+    local label = event.turnId or event.turn or event.id
+    local message_text = "Turn started"
+    if label then
+      message_text = message_text .. " (" .. tostring(label) .. ")"
+    end
+    M.add_message("system", message_text, false)
+
+  elseif event_type == "turn_end" then
+    local reason = event.reason or event.stopReason or event.error or event.finalError
+    local message_text = "Turn ended"
+    if event.aborted then
+      message_text = message_text .. " (aborted)"
+    end
+    if reason then
+      message_text = message_text .. ": " .. tostring(reason)
+    end
+    M.add_message("system", message_text, false)
+
+  elseif event_type == "tool_execution_start" then
+    local tool_id = event.toolCallId
+    local tool_name = event.toolName or event.tool or "tool"
+    local args = event.args or {}
+    register_tool_call_context({ id = tool_id, name = tool_name, args = args })
+    if config.get("ui.show_tool_streaming") ~= false then
+      ensure_tool_stream(tool_id, tool_name, args)
+    end
+    start_tool_spinner({ name = tool_name, args = args })
+
+  elseif event_type == "tool_execution_update" then
+    if config.get("ui.show_tool_streaming") ~= false then
+      append_tool_stream_partial(event.toolCallId, event.toolName or event.tool, event.args or {}, event.partialResult, { is_error = event.isError })
+    end
+
+  elseif event_type == "tool_execution_end" then
+    local tool_id = event.toolCallId
+    local tool_name = event.toolName or event.tool or "tool"
+    local args = event.args or {}
+    local result_text = format_tool_result_text(event.result, event)
+    update_tool_stream_output(tool_id, tool_name, args, result_text, true, { is_error = event.isError })
+    handle_tool_result_metadata(tool_name, event.result, args)
+    stop_tool_spinner()
+    flush_pending_file_paths()
+
+  elseif event_type == "auto_compaction_start" then
+    if config.get("ui.show_compaction_status") ~= false then
+      local message_text = "Auto-compaction started"
+      if event.reason then
+        message_text = message_text .. ": " .. tostring(event.reason)
+      end
+      M.add_message("system", message_text, false)
+    end
+
+  elseif event_type == "auto_compaction_end" then
+    if config.get("ui.show_compaction_status") ~= false then
+      local message_text = "Auto-compaction finished"
+      if event.aborted then
+        message_text = "Auto-compaction aborted"
+      elseif event.error then
+        message_text = "Auto-compaction error: " .. tostring(event.error)
+      end
+      local summary = {}
+      if event.result and event.result.tokensBefore then
+        table.insert(summary, "tokens before: " .. tostring(event.result.tokensBefore))
+      end
+      if event.result and event.result.tokensAfter then
+        table.insert(summary, "after: " .. tostring(event.result.tokensAfter))
+      end
+      if #summary > 0 then
+        message_text = message_text .. " (" .. table.concat(summary, ", ") .. ")"
+      end
+      M.add_message("system", message_text, false)
+    end
+
+  elseif event_type == "auto_retry_start" then
+    if config.get("ui.show_retry_status") ~= false then
+      local attempt = event.attempt or "?"
+      local max_attempts = event.maxAttempts or "?"
+      local message_text = string.format("Auto-retry %s/%s", attempt, max_attempts)
+      if event.delayMs then
+        message_text = message_text .. string.format(" in %dms", event.delayMs)
+      end
+      local err = event.errorMessage or event.error
+      if err then
+        message_text = message_text .. ": " .. tostring(err)
+      end
+      M.add_message("system", message_text, false)
+    end
+
+  elseif event_type == "auto_retry_end" then
+    if config.get("ui.show_retry_status") ~= false then
+      local final_error = event.finalError or event.error
+      local message_text = "Auto-retry finished"
+      if event.aborted then
+        message_text = "Auto-retry aborted"
+      elseif final_error then
+        message_text = "Auto-retry failed: " .. tostring(final_error)
+      end
+      M.add_message("system", message_text, false)
+    end
 
   elseif event_type == "message_update" then
     local delta = event.assistantMessageEvent
@@ -785,85 +1189,81 @@ function M.handle_event(event)
     -- Tool execution completed - may contain diff/output
     local result = event.result or event.output or event.content
     local tool_name = event.tool_name or event.tool or "tool"
-
-    -- Check for file path in various locations
-    local filepath = event.file or event.filepath
-    if not filepath and event.args then
-      filepath = event.args.file or event.args.path
+    local args = event.args or {}
+    if event.file or event.filepath then
+      args = vim.tbl_extend("force", args, { file = event.file or event.filepath })
     end
-    if not filepath and result then
-      if type(result) == "table" then
-        filepath = result.file or result.path or result.filepath
-      end
-    end
-
-    if filepath and (tool_name == "edit" or tool_name == "write") then
-      queue_file_path(filepath)
-    end
-
-    if result then
-      if not filepath then
-        filepath = extract_path_from_text(type(result) == "table" and (result.diff or result.output) or result)
-        if filepath then
-          queue_file_path(filepath)
-        end
-      end
-
-      if type(result) == "table" then
-        if result.diff then
-          queue_text_path(result.diff)
-        elseif result.output then
-          queue_text_path(result.output)
-        end
-      else
-        queue_text_path(result)
-      end
-    end
+    handle_tool_result_metadata(tool_name, result, args)
 
   end
 
-  if event.type == "message_end" and event.message and event.message.role == "toolResult" then
-    local tool_id = event.message.toolCallId
-    local context_command
-    if tool_id then
-      local context = M.tool_call_context[tool_id]
-      if context then
-        context_command = context.command
-        local resolved = context.filepath or context.raw_path
-        if resolved then
-          queue_file_path(resolved)
+  if event.type == "message_end" and event.message then
+    if event.message.role == "toolResult" then
+      local tool_id = event.message.toolCallId
+      local context_command
+      if tool_id then
+        local context = M.tool_call_context[tool_id]
+        if context then
+          context_command = context.command
+          local resolved = context.filepath or context.raw_path
+          if resolved then
+            queue_file_path(resolved)
+          end
+        end
+        M.tool_call_context[tool_id] = nil
+      end
+
+      local tool_name = event.message.toolName or event.message.tool or "tool"
+      local tool_message_parts = {}
+      for _, chunk in ipairs(event.message.content or {}) do
+        if type(chunk) == "table" and chunk.text then
+          table.insert(tool_message_parts, chunk.text)
+        elseif type(chunk) == "string" then
+          table.insert(tool_message_parts, chunk)
         end
       end
-      M.tool_call_context[tool_id] = nil
-    end
+      local result_text = table.concat(tool_message_parts, "")
 
-    local tool_name = event.message.toolName or event.message.tool or "tool"
-    local tool_message_parts = {}
-    for _, chunk in ipairs(event.message.content or {}) do
-      if type(chunk) == "table" and chunk.text then
-        table.insert(tool_message_parts, chunk.text)
-      elseif type(chunk) == "string" then
-        table.insert(tool_message_parts, chunk)
+      if tool_name == "bash" and context_command and context_command:match("pwd") then
+        local cwd_guess = vim.trim(result_text)
+        if cwd_guess ~= "" then
+          M.agent_cwd = cwd_guess
+        end
       end
-    end
-    local result_text = table.concat(tool_message_parts, "")
 
-    if tool_name == "bash" and context_command and context_command:match("pwd") then
-      local cwd_guess = vim.trim(result_text)
-      if cwd_guess ~= "" then
-        M.agent_cwd = cwd_guess
+      if event.message.details and event.message.details.diff then
+        queue_text_path(event.message.details.diff)
+        result_text = result_text .. "\n\nDiff:\n" .. event.message.details.diff
       end
-    end
 
-    if event.message.details and event.message.details.diff then
-      queue_text_path(event.message.details.diff)
-      result_text = result_text .. "\n\nDiff:\n" .. event.message.details.diff
-    end
+      local display = result_text ~= "" and result_text or "(no output)"
+      local stream = tool_id and M.tool_streams[tool_id]
+      if stream then
+        update_tool_stream_output(tool_id, tool_name, stream.args or {}, display, true, { is_error = event.message.isError })
+        M.tool_streams[tool_id] = nil
+      else
+        M.add_message("tool_result", display, false, { tool_id = tool_id, tool_name = tool_name, is_error = event.message.isError })
+      end
+      stop_tool_spinner()
+      flush_pending_file_paths()
 
-    local display = result_text ~= "" and result_text or "(no output)"
-    M.add_message("tool_result", display, false)
-    stop_tool_spinner()
-    flush_pending_file_paths()
+    elseif event.message.role == "bashExecution" then
+      local parts = {}
+      if type(event.message.content) == "string" then
+        table.insert(parts, event.message.content)
+      else
+        for _, chunk in ipairs(event.message.content or {}) do
+          if type(chunk) == "table" and chunk.text then
+            table.insert(parts, chunk.text)
+          elseif type(chunk) == "string" then
+            table.insert(parts, chunk)
+          end
+        end
+      end
+      local result_text = table.concat(parts, "")
+      local display = result_text ~= "" and result_text or "(no output)"
+      M.add_message("tool_result", display, false, { tool_name = "bash" })
+    end
   end
 
   -- Always re-render after handling an event
@@ -895,11 +1295,16 @@ function M.open_file_in_other_window(filepath)
   end, 50)
 end
 
-function M.add_message(role, content, is_streaming)
+function M.add_message(role, content, is_streaming, opts)
+  opts = opts or {}
   local entry = {
     role = role,
     content = content,
     streaming = is_streaming,
+    images = opts.images,
+    tool_id = opts.tool_id,
+    tool_name = opts.tool_name,
+    is_error = opts.is_error,
   }
   if role == "assistant" then
     entry.thinking = ""
@@ -1070,7 +1475,23 @@ local function perform_render()
     for _, line in ipairs(split_text(msg.content)) do
       add_line(line)
     end
+    if msg.images and #msg.images > 0 then
+      add_line("", nil)
+      add_line("**Attachments:**")
+      for _, image in ipairs(msg.images) do
+        add_line(string.format("![](%s)", format_image_label(image)))
+      end
+    end
     add_line("", nil)
+  end
+
+  local function render_user_attachments(msg, highlight)
+    if not msg.images or #msg.images == 0 then
+      return
+    end
+    for _, image in ipairs(msg.images) do
+      add_message_lines("[Image] " .. format_image_label(image), highlight)
+    end
   end
 
   local function render_tool_markdown(msg)
@@ -1174,6 +1595,9 @@ local function perform_render()
   if M.is_streaming then
     table.insert(status_parts, "● working")
   end
+  if #M.pending_images > 0 then
+    table.insert(status_parts, string.format("%d image(s) attached", #M.pending_images))
+  end
 
   if #status_parts > 0 then
     add_line("  " .. table.concat(status_parts, "  •  "))
@@ -1188,6 +1612,7 @@ local function perform_render()
         render_user_markdown(msg)
       else
         add_message_lines(msg.content, USER_PROMPT_HL)
+        render_user_attachments(msg, USER_PROMPT_HL)
       end
 
     elseif msg.role == "assistant" then
@@ -1225,7 +1650,11 @@ local function perform_render()
 
   ensure_separator()
   add_line("  " .. string.rep("─", width - 2))
-  add_line("  Enter=send  Shift+Enter=new line  q=close")
+  local footer = "Enter=send  Shift+Enter=new line  q=close"
+  if config.get("ui.allow_image_attachments") ~= false then
+    footer = footer .. "  Ctrl+g=attach"
+  end
+  add_line("  " .. footer)
 
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(M.result_buf, 0, -1, false, lines)
@@ -1304,27 +1733,43 @@ function M.render()
   do_render()
 end
 
-function M.send_message(text)
+function M.send_message(text, opts)
+  opts = opts or {}
   local client = state.get("rpc_client")
   if not client then
     vim.notify("Pi: Not connected", vim.log.levels.ERROR)
-    return
+    return false
   end
 
-  M.pending_file_paths = {}
-  M.add_message("user", text, false)
-  M.is_streaming = true
-  M.current_response = ""
-  M.current_thinking = ""
+  local images_payload, display_images = collect_pending_images()
 
-  client:request("prompt", { type = "prompt", message = text }, function(result)
+  if not M.is_streaming then
+    M.pending_file_paths = {}
+    M.is_streaming = true
+    M.current_response = ""
+    M.current_thinking = ""
+  end
+
+  M.add_message("user", text, false, { images = display_images })
+
+  local prompt_opts = {}
+  if images_payload then
+    prompt_opts.images = images_payload
+  end
+  if opts.streamingBehavior then
+    prompt_opts.streamingBehavior = opts.streamingBehavior
+  end
+
+  local agent = require("pi.rpc.agent")
+  agent.prompt(client, text, prompt_opts, function(result)
     vim.schedule(function()
-      if result.error then
+      if result and result.error then
         M.is_streaming = false
         M.add_message("system", "Error: " .. result.error, false)
       end
     end)
   end)
+  return true
 end
 
 function M.load_history()
@@ -1375,8 +1820,14 @@ function M.load_history()
               end
             end
 
+            if role == "toolResult" or role == "tool_result" then
+              role = "tool_result"
+            elseif role == "bashExecution" then
+              role = "tool_result"
+            end
+
             if role then
-              local entry = { role = role, content = content, streaming = false }
+              local entry = { role = role, content = content, streaming = false, images = msg.images }
               if role == "assistant" then
                 entry.thinking = thinking_text
               end

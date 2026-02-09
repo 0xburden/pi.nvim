@@ -1,3 +1,5 @@
+local config = require("pi.config")
+
 local M = {}
 
 function M.new()
@@ -10,6 +12,50 @@ function M.new()
   }
   setmetatable(self, { __index = M })
   return self
+end
+
+local function append_log(entry)
+  local state = require("pi.state")
+  local events = require("pi.events")
+  local entries = state.get("logs.entries") or {}
+  table.insert(entries, entry)
+  local max_entries = config.get("max_log_entries") or 1000
+  if #entries > max_entries then
+    table.remove(entries, 1)
+  end
+  state.update("logs.entries", entries)
+  events.emit("log_entry", entry)
+end
+
+local function merge_messages(existing, incoming)
+  local seen = {}
+  for _, msg in ipairs(existing) do
+    local id = msg.entryId or msg.id
+    if id then
+      seen[id] = true
+    else
+      local signature = string.format("%s:%s:%s", msg.role or "?", msg.timestamp or "", vim.json.encode(msg.content) or "")
+      seen[signature] = true
+    end
+  end
+
+  for _, msg in ipairs(incoming) do
+    local id = msg.entryId or msg.id
+    if id then
+      if not seen[id] then
+        table.insert(existing, msg)
+        seen[id] = true
+      end
+    else
+      local signature = string.format("%s:%s:%s", msg.role or "?", msg.timestamp or "", vim.json.encode(msg.content) or "")
+      if not seen[signature] then
+        table.insert(existing, msg)
+        seen[signature] = true
+      end
+    end
+  end
+
+  return existing
 end
 
 function M:connect(callback)
@@ -211,17 +257,25 @@ function M:_handle_message(message)
     -- Update state based on event type
     if event_type == "agent_start" then
       state.update("agent.running", true)
+      append_log({
+        timestamp = vim.loop.now(),
+        level = "INFO",
+        message = "Agent started",
+      })
       
     elseif event_type == "agent_end" then
       state.update("agent.running", false)
-      -- Store the messages from this run
+      -- Store the messages from this run without duplication
       if message.messages then
         local conv_messages = state.get("conversation.messages") or {}
-        for _, msg in ipairs(message.messages) do
-          table.insert(conv_messages, msg)
-        end
+        conv_messages = merge_messages(conv_messages, message.messages)
         state.update("conversation.messages", conv_messages)
       end
+      append_log({
+        timestamp = vim.loop.now(),
+        level = "INFO",
+        message = "Agent ended",
+      })
       
     elseif event_type == "message_start" then
       state.update("agent.current_message", message.message)
@@ -242,10 +296,17 @@ function M:_handle_message(message)
       state.update("agent.last_message", message.message)
       
     elseif event_type == "tool_execution_start" then
-      state.update("agent.current_tool", {
+      local tool_info = {
         id = message.toolCallId,
         name = message.toolName,
         args = message.args,
+      }
+      state.update("agent.current_tool", tool_info)
+      append_log({
+        timestamp = vim.loop.now(),
+        level = "INFO",
+        message = string.format("Tool started: %s", message.toolName or "tool"),
+        data = tool_info,
       })
       
     elseif event_type == "tool_execution_update" then
@@ -255,23 +316,68 @@ function M:_handle_message(message)
       
     elseif event_type == "tool_execution_end" then
       state.update("agent.current_tool", nil)
-      state.update("agent.last_tool_result", {
+      local tool_result = {
         id = message.toolCallId,
         name = message.toolName,
         result = message.result,
         is_error = message.isError,
+      }
+      state.update("agent.last_tool_result", tool_result)
+      append_log({
+        timestamp = vim.loop.now(),
+        level = message.isError and "ERROR" or "INFO",
+        message = string.format("Tool ended: %s", message.toolName or "tool"),
+        data = tool_result,
+      })
+      
+    elseif event_type == "turn_start" then
+      state.update("agent.current_turn", message)
+      append_log({
+        timestamp = vim.loop.now(),
+        level = "INFO",
+        message = "Turn started",
+        data = message,
+      })
+      
+    elseif event_type == "turn_end" then
+      state.update("agent.current_turn", nil)
+      state.update("agent.last_turn", message)
+      append_log({
+        timestamp = vim.loop.now(),
+        level = "INFO",
+        message = "Turn ended",
+        data = message,
       })
       
     elseif event_type == "auto_compaction_start" then
       state.update("agent.compacting", true)
       state.update("agent.compaction_reason", message.reason)
+      append_log({
+        timestamp = vim.loop.now(),
+        level = "INFO",
+        message = "Auto-compaction started",
+        data = { reason = message.reason },
+      })
       
     elseif event_type == "auto_compaction_end" then
       state.update("agent.compacting", false)
       state.update("agent.compaction_reason", nil)
-      if message.result then
-        state.update("agent.last_compaction", message.result)
-      end
+      state.update("agent.last_compaction", {
+        result = message.result,
+        error = message.error,
+        aborted = message.aborted,
+        reason = message.reason,
+      })
+      append_log({
+        timestamp = vim.loop.now(),
+        level = message.error and "ERROR" or "INFO",
+        message = "Auto-compaction ended",
+        data = {
+          result = message.result,
+          error = message.error,
+          aborted = message.aborted,
+        },
+      })
       
     elseif event_type == "auto_retry_start" then
       state.update("agent.retrying", true)
@@ -279,12 +385,39 @@ function M:_handle_message(message)
         attempt = message.attempt,
         max_attempts = message.maxAttempts,
         delay_ms = message.delayMs,
-        error = message.errorMessage,
+        error = message.errorMessage or message.error,
+        will_retry = message.willRetry,
+      })
+      append_log({
+        timestamp = vim.loop.now(),
+        level = "WARN",
+        message = "Auto-retry scheduled",
+        data = {
+          attempt = message.attempt,
+          max_attempts = message.maxAttempts,
+          delay_ms = message.delayMs,
+          error = message.errorMessage or message.error,
+        },
       })
       
     elseif event_type == "auto_retry_end" then
       state.update("agent.retrying", false)
       state.update("agent.retry_info", nil)
+      state.update("agent.last_retry", {
+        final_error = message.finalError or message.error,
+        will_retry = message.willRetry,
+        aborted = message.aborted,
+      })
+      append_log({
+        timestamp = vim.loop.now(),
+        level = message.finalError and "ERROR" or "INFO",
+        message = "Auto-retry ended",
+        data = {
+          final_error = message.finalError or message.error,
+          will_retry = message.willRetry,
+          aborted = message.aborted,
+        },
+      })
       
     elseif event_type == "extension_error" then
       -- Log extension errors

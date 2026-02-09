@@ -91,6 +91,12 @@ vim.api.nvim_create_user_command("PiChat", function()
   require("pi.ui.chat").toggle()
 end, { desc = "Toggle Pi chat" })
 
+vim.api.nvim_create_user_command("PiChatAttach", function(opts)
+  local chat = require("pi.ui.chat")
+  local path = opts.args ~= "" and opts.args or nil
+  chat.attach_image(path)
+end, { nargs = "?", complete = "file", desc = "Attach image to Pi chat" })
+
 vim.api.nvim_create_user_command("PiDiff", function(opts)
   local filepath = opts.args
   if filepath == "" then
