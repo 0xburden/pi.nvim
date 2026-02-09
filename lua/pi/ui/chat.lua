@@ -3,6 +3,7 @@ local events = require("pi.events")
 local config = require("pi.config")
 local commands = require("pi.rpc.commands")
 local autocomplete = require("pi.ui.autocomplete")
+local colors = require("pi.ui.colors")
 
 local M = {}
 local commands_loading = false
@@ -29,84 +30,42 @@ local TOOL_RESULT_HL = "PiChatToolResult"
 local DIFF_ADD_HL = "PiChatDiffAdd"
 local DIFF_DEL_HL = "PiChatDiffDel"
 
-local function safe_get_highlight(name)
-  local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
-  if not ok or not hl then
-    return {}
-  end
-  return hl
-end
-
 local function setup_highlights()
-  local comment_hl = safe_get_highlight("Comment")
-  local thinking_opts = { italic = true }
-  if comment_hl.fg then
-    thinking_opts.fg = comment_hl.fg
-  end
-  if comment_hl.bg then
-    thinking_opts.bg = comment_hl.bg
-  end
-  vim.api.nvim_set_hl(0, THINKING_HL, thinking_opts)
+  local code_bg = colors.get_code_bg()
+  local user_bg = colors.get_user_message_bg()
+  local highlights = {
+    [THINKING_HL] = {
+      fg_link = "Comment",
+      italic = true,
+    },
+    [USER_PROMPT_HL] = {
+      bg = user_bg,
+    },
+    [TOOL_RESULT_HL] = {
+      fg_link = "Special",
+    },
+    ["PiChatCodeBlock"] = {
+      bg = code_bg,
+    },
+    ["PiChatInlineCode"] = {
+      fg_link = "String",
+      bg = code_bg,
+    },
+    ["PiChatCodeFence"] = {
+      fg_link = "Comment",
+      italic = true,
+    },
+    [DIFF_ADD_HL] = {
+      link = "DiffAdd",
+    },
+    [DIFF_DEL_HL] = {
+      link = "DiffDelete",
+    },
+  }
 
-  local normal_hl = safe_get_highlight("Normal")
-  local pmenu_hl = safe_get_highlight("Pmenu")
-  local user_opts = {}
-  if normal_hl.fg then
-    user_opts.fg = normal_hl.fg
+  for name, def in pairs(highlights) do
+    colors.apply_highlight(name, def)
   end
-  if pmenu_hl.bg then
-    user_opts.bg = pmenu_hl.bg
-  elseif pmenu_hl.fg then
-    user_opts.bg = pmenu_hl.fg
-  end
-  if next(user_opts) == nil then
-    user_opts.bg = 0x1f1f1f
-  end
-  vim.api.nvim_set_hl(0, USER_PROMPT_HL, user_opts)
-
-  local diff_add_hl = safe_get_highlight("DiffAdd")
-  local diff_del_hl = safe_get_highlight("DiffDelete")
-  local function copy_highlight(src, name)
-    local opts = {}
-    if src.fg then opts.fg = src.fg end
-    if src.bg then opts.bg = src.bg end
-    if src.reverse then opts.reverse = src.reverse end
-    if src.italic then opts.italic = src.italic end
-    if src.bold then opts.bold = src.bold end
-    vim.api.nvim_set_hl(0, name, opts)
-  end
-  copy_highlight(diff_add_hl, DIFF_ADD_HL)
-  copy_highlight(diff_del_hl, DIFF_DEL_HL)
-
-  local tool_hl = safe_get_highlight("Special")
-  vim.api.nvim_set_hl(0, TOOL_RESULT_HL, {
-    fg = tool_hl.fg or comment_hl.fg,
-    bg = tool_hl.bg or comment_hl.bg,
-  })
-
-  local code_bg = pmenu_hl.bg or normal_hl.bg
-  local code_block_opts = {}
-  if code_bg then
-    code_block_opts.bg = code_bg
-  end
-  vim.api.nvim_set_hl(0, "PiChatCodeBlock", code_block_opts)
-
-  local string_hl = safe_get_highlight("String")
-  local inline_opts = {}
-  if string_hl.fg then
-    inline_opts.fg = string_hl.fg
-  end
-  if code_bg then
-    inline_opts.bg = code_bg
-  end
-  vim.api.nvim_set_hl(0, "PiChatInlineCode", inline_opts)
-
-  local fence_opts = {}
-  if comment_hl.fg then
-    fence_opts.fg = comment_hl.fg
-  end
-  fence_opts.italic = true
-  vim.api.nvim_set_hl(0, "PiChatCodeFence", fence_opts)
 end
 
 setup_highlights()
