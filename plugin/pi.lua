@@ -907,3 +907,7 @@ vim.api.nvim_create_user_command("PiRun", function(opts)
   -- Send as prompt (Pi will handle command execution)
   require("pi").start(command)
 end, { nargs = "+", desc = "Run a Pi command (e.g., :PiRun skill:search query)" })
+
+vim.api.nvim_create_user_command("PiPalette", function()
+  require("pi.ui.command_palette").open()
+end, { desc = "Open Pi command palette" })

@@ -101,6 +101,9 @@ COMMANDS                                                         *pi-commands|
 :PiLogs                                                           *:PiLogs*
     Toggle the logs viewer
 
+:PiPalette                                                        *:PiPalette*
+    Open the Pi command palette (Ctrl+P style list of extensions/prompts/skills)
+
 :PiChat                                                           *:PiChat*
     Open the chat interface for streaming responses
 
@@ -128,19 +131,20 @@ CHAT INTERFACE                                                   *pi-chat|
 The chat window uses a vertical split plus a bottom input buffer. The assistant
 messages are rendered with syntax-highlighted code fences, optional inline
 code highlights, and italicized thinking text. When `render-markdown.nvim` is
-installed and enabled via `ui.use_render_markdown`, the chat buffer simply uses
-`filetype=markdown` so the plugin handles coloring automatically.
+installed and enabled via `ui.use_render_markdown`, the chat buffer simply sets
+`filetype=markdown` so the plugin handles rendering for you automatically.
 
 Typing `/` in the input while autocomplete is enabled opens a floating command
-palette that filters Pi commands (extensions, prompts, skills). Navigate the list
-with `Ctrl+N`/`Ctrl+P` or arrow keys. Press `Tab`/`Enter` to accept the selected
-command; this also shows a timed parameter hint overlay with argument info for
-that command. Press `Esc` to close the autocomplete/hint window and resume
-typing.
+palette that filters Pi commands (extensions, prompts, skills) in real time.
+Navigate the list with `Ctrl+N`/`Ctrl+P`, `Tab`/`Shift+Tab`, or the arrow keys.
+Press `Tab`/`Enter` to accept a command; this also shows a timed parameter hint
+overlay with argument information for that command. Press `Esc` to close the
+autocomplete/hint window and keep typing.
 
 Use `ui.autocomplete_fuzzy`, `ui.autocomplete_max_items`, and
-`ui.autocomplete_enabled` in the configuration table to tune the command
-palette.
+`ui.autocomplete_enabled` to tweak the inline palette behavior. The
+`:PiPalette` command exposes a global command list (Ctrl+P style) to run any Pi
+extension/prompt/skill regardless of the current slash input.
 
 ===============================================================================
 API                                                                   *:pi-api|
