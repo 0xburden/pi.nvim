@@ -340,6 +340,9 @@ function M._open_ui()
   local origin_win = vim.api.nvim_get_current_win()
 
   M.result_buf = get_or_create_buf(M.RESULT_BUF_NAME, true)
+  if use_render_markdown then
+    pcall(vim.api.nvim_buf_set_option, M.result_buf, "filetype", "markdown")
+  end
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
   vim.api.nvim_buf_set_option(M.result_buf, "wrap", true)
   vim.api.nvim_buf_set_option(M.result_buf, "linebreak", true)
@@ -901,13 +904,16 @@ local function perform_render()
   local function add_line(text, hl)
     table.insert(lines, text or "")
     local idx = #lines - 1
-    if hl then
+    if hl and not use_render_markdown then
       table.insert(line_highlights, { line = idx, group = hl })
     end
     return idx
   end
 
   local function add_range_highlight(line, col_start, col_end, group)
+    if use_render_markdown then
+      return
+    end
     if line == nil or col_start == nil or col_end == nil or not group then
       return
     end
@@ -973,14 +979,50 @@ local function perform_render()
     local thinking = msg.thinking or ""
     if thinking ~= "" then
       for _, line in ipairs(split_text(thinking)) do
-        add_line("  > " .. line, THINKING_HL)
+        add_line("> " .. line)
       end
       add_line("", nil)
     end
     local body = strip_thinking(msg.content or "", thinking)
     for _, line in ipairs(split_text(body)) do
-      add_line("  " .. line)
+      add_line(line)
     end
+    add_line("", nil)
+  end
+
+  local function render_user_markdown(msg)
+    add_line("**User:**")
+    add_line("", nil)
+    for _, line in ipairs(split_text(msg.content)) do
+      add_line(line)
+    end
+    add_line("", nil)
+  end
+
+  local function render_tool_markdown(msg)
+    add_line("**Tool:**")
+    add_line("", nil)
+    for _, line in ipairs(split_text(msg.content)) do
+      add_line(line)
+    end
+    add_line("", nil)
+  end
+
+  local function render_tool_result_markdown(msg)
+    local content = msg.content or ""
+    local has_diff = content:match("\n%s*[+-]") or content:match("^[+-]")
+    local lang = has_diff and "diff" or ""
+    add_line("```" .. lang)
+    for _, line in ipairs(split_text(content)) do
+      add_line(line)
+    end
+    add_line("```")
+    add_line("", nil)
+  end
+
+  local function render_system_markdown(msg)
+    add_line("> ⚠️ " .. (msg.content or ""))
+    add_line("", nil)
   end
 
   local function render_assistant_custom(msg)
@@ -1068,19 +1110,35 @@ local function perform_render()
     ensure_separator()
 
     if msg.role == "user" then
-      add_message_lines(msg.content, USER_PROMPT_HL)
+      if use_render_markdown then
+        render_user_markdown(msg)
+      else
+        add_message_lines(msg.content, USER_PROMPT_HL)
+      end
 
     elseif msg.role == "assistant" then
       render_assistant(msg)
 
     elseif msg.role == "tool" then
-      add_message_lines(msg.content)
+      if use_render_markdown then
+        render_tool_markdown(msg)
+      else
+        add_message_lines(msg.content)
+      end
 
     elseif msg.role == "tool_result" then
-      add_message_lines(msg.content, TOOL_RESULT_HL, diff_line_highlight)
+      if use_render_markdown then
+        render_tool_result_markdown(msg)
+      else
+        add_message_lines(msg.content, TOOL_RESULT_HL, diff_line_highlight)
+      end
 
     elseif msg.role == "system" then
-      add_line("  ⚠️  " .. (msg.content or ""))
+      if use_render_markdown then
+        render_system_markdown(msg)
+      else
+        add_line("  ⚠️  " .. (msg.content or ""))
+      end
     end
   end
 
@@ -1099,34 +1157,36 @@ local function perform_render()
   vim.api.nvim_buf_set_lines(M.result_buf, 0, -1, false, lines)
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
 
-  vim.api.nvim_buf_clear_namespace(M.result_buf, HIGHLIGHT_NS, 0, -1)
-  for _, hl in ipairs(line_highlights) do
-    vim.api.nvim_buf_add_highlight(M.result_buf, HIGHLIGHT_NS, hl.group, hl.line, 0, -1)
-  end
-
-  local function apply_range(entry)
-    if not entry or entry.line == nil or not entry.group then
-      return
+  if not use_render_markdown then
+    vim.api.nvim_buf_clear_namespace(M.result_buf, HIGHLIGHT_NS, 0, -1)
+    for _, hl in ipairs(line_highlights) do
+      vim.api.nvim_buf_add_highlight(M.result_buf, HIGHLIGHT_NS, hl.group, hl.line, 0, -1)
     end
-    local has_highlight = vim.highlight and vim.highlight.range
-    if has_highlight then
-      vim.highlight.range(
-        M.result_buf,
-        HIGHLIGHT_NS,
-        entry.group,
-        { entry.line, entry.col_start },
-        { entry.line, entry.col_end }
-      )
-    else
-      vim.api.nvim_buf_set_extmark(M.result_buf, HIGHLIGHT_NS, entry.line, entry.col_start, {
-        end_col = entry.col_end,
-        hl_group = entry.group,
-      })
-    end
-  end
 
-  for _, entry in ipairs(range_highlights) do
-    apply_range(entry)
+    local function apply_range(entry)
+      if not entry or entry.line == nil or not entry.group then
+        return
+      end
+      local has_highlight = vim.highlight and vim.highlight.range
+      if has_highlight then
+        vim.highlight.range(
+          M.result_buf,
+          HIGHLIGHT_NS,
+          entry.group,
+          { entry.line, entry.col_start },
+          { entry.line, entry.col_end }
+        )
+      else
+        vim.api.nvim_buf_set_extmark(M.result_buf, HIGHLIGHT_NS, entry.line, entry.col_start, {
+          end_col = entry.col_end,
+          hl_group = entry.group,
+        })
+      end
+    end
+
+    for _, entry in ipairs(range_highlights) do
+      apply_range(entry)
+    end
   end
 
   if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
