@@ -4,12 +4,18 @@ local config = require("pi.config")
 local commands = require("pi.rpc.commands")
 
 local namespace = vim.api.nvim_create_namespace("pi_autocomplete")
+local hint_ns = vim.api.nvim_create_namespace("pi_autocomplete_hint")
 
 local win = nil
 local buf = nil
 local items = {}
 local selected_index = 1
 local filter_text = ""
+
+local hint_buf = nil
+local hint_win = nil
+local hint_timer = nil
+local hint_on_close = nil
 
 local function get_max_items()
   local max_items = config.get("ui.autocomplete_max_items")
@@ -81,6 +87,19 @@ local function ensure_buffer()
   return buf
 end
 
+local function ensure_hint_buf()
+  if hint_buf and vim.api.nvim_buf_is_valid(hint_buf) then
+    return hint_buf
+  end
+  hint_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_option(hint_buf, "buftype", "nofile")
+  vim.api.nvim_buf_set_option(hint_buf, "bufhidden", "wipe")
+  vim.api.nvim_buf_set_option(hint_buf, "swapfile", false)
+  vim.api.nvim_buf_set_option(hint_buf, "modifiable", false)
+  vim.api.nvim_buf_set_option(hint_buf, "filetype", "pi-autocomplete-hint")
+  return hint_buf
+end
+
 local function create_window(anchor_win, cursor_row, cursor_col, width)
   if not anchor_win or not vim.api.nvim_win_is_valid(anchor_win) then
     return nil
@@ -113,6 +132,174 @@ local function create_window(anchor_win, cursor_row, cursor_col, width)
   })
 end
 
+local function close_hint_timer()
+  if hint_timer then
+    pcall(vim.fn.timer_stop, hint_timer)
+    hint_timer = nil
+  end
+end
+
+function M.close_hint()
+  close_hint_timer()
+  if hint_win and vim.api.nvim_win_is_valid(hint_win) then
+    vim.api.nvim_win_close(hint_win, true)
+    hint_win = nil
+  end
+  if hint_buf and vim.api.nvim_buf_is_valid(hint_buf) then
+    vim.api.nvim_buf_delete(hint_buf, { force = true })
+    hint_buf = nil
+  end
+  if hint_on_close then
+    local cb = hint_on_close
+    hint_on_close = nil
+    cb()
+  end
+end
+
+local function build_hint_lines(cmd)
+  if not cmd then
+    return {}
+  end
+
+  local name = cmd.name or ""
+  if vim.startswith(name, "/") then
+    name = name:sub(2)
+  end
+
+  local signature = "/" .. name
+  local arg_sources = {}
+  if type(cmd.arguments) == "table" then
+    for _, arg in ipairs(cmd.arguments) do
+      if type(arg) == "table" and arg.name then
+        table.insert(arg_sources, "[" .. arg.name .. "]")
+      elseif type(arg) == "string" then
+        table.insert(arg_sources, arg)
+      end
+    end
+  end
+  if #arg_sources == 0 and type(cmd.params) == "table" then
+    for _, arg in ipairs(cmd.params) do
+      if type(arg) == "string" then
+        table.insert(arg_sources, arg)
+      end
+    end
+  end
+  if #arg_sources == 0 and type(cmd.parameters) == "table" then
+    for _, arg in ipairs(cmd.parameters) do
+      table.insert(arg_sources, tostring(arg))
+    end
+  end
+  if #arg_sources == 0 and type(cmd.signature) == "string" and cmd.signature ~= "" then
+    table.insert(arg_sources, cmd.signature)
+  elseif #arg_sources == 0 and type(cmd.usage) == "string" and cmd.usage ~= "" then
+    table.insert(arg_sources, cmd.usage)
+  elseif #arg_sources == 0 and type(cmd.syntax) == "string" and cmd.syntax ~= "" then
+    table.insert(arg_sources, cmd.syntax)
+  end
+
+  if #arg_sources > 0 then
+    signature = signature .. " " .. table.concat(arg_sources, " ")
+  end
+
+  local lines = {}
+  table.insert(lines, signature)
+
+  if cmd.description and cmd.description ~= "" then
+    table.insert(lines, "")
+    table.insert(lines, cmd.description)
+  end
+  if cmd.source and cmd.source ~= "" then
+    table.insert(lines, "")
+    table.insert(lines, "Source: " .. cmd.source)
+  end
+  if cmd.location and cmd.location ~= "" then
+    table.insert(lines, "Location: " .. cmd.location)
+  end
+
+  return lines
+end
+
+local function calculate_hint_size(lines)
+  local max_width = 0
+  for _, line in ipairs(lines) do
+    max_width = math.max(max_width, #line)
+  end
+  local width = math.min(vim.o.columns - 4, math.max(20, max_width + 4))
+  local height = math.min(#lines, vim.o.lines - 4)
+  if height < 1 then height = 1 end
+  return width, height
+end
+
+local function open_hint_window(anchor_win, cursor_row, cursor_col, width, height)
+  if not anchor_win or not vim.api.nvim_win_is_valid(anchor_win) then
+    return nil
+  end
+  local win_pos = vim.api.nvim_win_get_position(anchor_win)
+  local row = win_pos[1] + cursor_row
+  local col = win_pos[2] + cursor_col
+  if row + height + 1 > vim.o.lines then
+    row = math.max(0, win_pos[1] + cursor_row - height - 1)
+  end
+  if col + width > vim.o.columns then
+    col = math.max(0, vim.o.columns - width - 1)
+  end
+  return vim.api.nvim_open_win(hint_buf, false, {
+    relative = "editor",
+    row = row,
+    col = col,
+    width = width,
+    height = height,
+    style = "minimal",
+    border = "rounded",
+    focusable = false,
+    zindex = 210,
+  })
+end
+
+local function schedule_hint_close(duration)
+  close_hint_timer()
+  hint_timer = vim.fn.timer_start(duration or 4000, function()
+    vim.schedule(function()
+      M.close_hint()
+    end)
+  end)
+end
+
+function M.show_parameter_hint(item, anchor_win, cursor_row, cursor_col, opts)
+  opts = opts or {}
+  if not item or not anchor_win or not vim.api.nvim_win_is_valid(anchor_win) then
+    return
+  end
+
+  local raw_name = item.name or ""
+  if vim.startswith(raw_name, "/") then
+    raw_name = raw_name:sub(2)
+  end
+  local cmd = commands.find(raw_name) or { name = raw_name, description = item.description, source = item.source, location = item.location }
+  local lines = build_hint_lines(cmd)
+  if #lines == 0 then
+    return
+  end
+
+  M.close_hint()
+  local buffer = ensure_hint_buf()
+  vim.api.nvim_buf_set_option(buffer, "modifiable", true)
+  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+  vim.api.nvim_buf_set_option(buffer, "modifiable", false)
+
+  local width, height = calculate_hint_size(lines)
+  hint_win = open_hint_window(anchor_win, cursor_row, cursor_col, width, height)
+  if hint_win and vim.api.nvim_win_is_valid(hint_win) then
+    vim.api.nvim_buf_add_highlight(buffer, hint_ns, "PmenuSel", 0, 0, -1)
+    vim.api.nvim_buf_set_option(buffer, "wrap", true)
+    vim.api.nvim_win_set_option(hint_win, "winblend", 0)
+    vim.api.nvim_win_set_option(hint_win, "cursorline", false)
+  end
+
+  hint_on_close = opts.on_close
+  schedule_hint_close(opts.duration)
+end
+
 function M.open(anchor_win, cursor_row, cursor_col, max_width)
   if M.is_open() or not anchor_win then
     return
@@ -137,7 +324,11 @@ function M.open(anchor_win, cursor_row, cursor_col, max_width)
   render_lines()
 end
 
-function M.close()
+function M.close(opts)
+  opts = opts or {}
+  if not opts.keep_hint then
+    M.close_hint()
+  end
   if win and vim.api.nvim_win_is_valid(win) then
     vim.api.nvim_win_close(win, true)
   end

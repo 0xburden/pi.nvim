@@ -106,6 +106,7 @@ M.tool_spinner_active = false
 M.tool_spinner_label = nil
 M.spinner_frames = { "⠋", "⠙", "⠚", "⠞", "⠖", "⠦", "⠴", "⠲", "⠳", "⠓" }
 M.spinner_index = 1
+M.parameter_hint_active = false
 
 -- Constants
 M.RESULT_BUF_NAME = "PiChat"
@@ -550,6 +551,9 @@ function M.handle_text_change()
   local before_cursor = line:sub(1, cursor[2])
   local slash_match = before_cursor:match("^%s*/([%w_%-]*)$") or before_cursor:match("%s+/([%w_%-]*)$")
   if not slash_match then
+    if M.parameter_hint_active then
+      return
+    end
     autocomplete.close()
     return
   end
@@ -649,7 +653,18 @@ function M.accept_autocomplete()
   vim.api.nvim_buf_set_lines(M.input_buf, cursor[1] - 1, cursor[1], false, { replacement })
   local new_col = #prefix + #command_name + 1
   vim.api.nvim_win_set_cursor(M.input_win, { cursor[1], new_col })
-  autocomplete.close()
+  local anchor_win = M.input_win
+  local hint_row = cursor[1]
+  local hint_col = new_col
+  autocomplete.close({ keep_hint = true })
+  if anchor_win and vim.api.nvim_win_is_valid(anchor_win) then
+    autocomplete.show_parameter_hint(selected, anchor_win, hint_row, hint_col, {
+      on_close = function()
+        M.parameter_hint_active = false
+      end,
+    })
+    M.parameter_hint_active = true
+  end
 end
 
 function M.subscribe_to_events()
@@ -1319,6 +1334,7 @@ end
 
 function M.close()
   autocomplete.close()
+  autocomplete.close_hint()
   stop_spinner_animation()
   if pending_render_timer then
     vim.fn.timer_stop(pending_render_timer)
