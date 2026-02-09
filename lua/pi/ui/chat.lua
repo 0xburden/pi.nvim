@@ -29,6 +29,12 @@ local USER_PROMPT_HL = "PiChatUserPrompt"
 local TOOL_RESULT_HL = "PiChatToolResult"
 local DIFF_ADD_HL = "PiChatDiffAdd"
 local DIFF_DEL_HL = "PiChatDiffDel"
+local last_render_time = 0
+local render_debounce_ms = 16
+local pending_render_timer
+
+local spinner_interval = 100
+local spinner_timer
 
 local function setup_highlights()
   local code_bg = colors.get_code_bg()
@@ -168,6 +174,29 @@ local function register_tool_call_context(tool)
   M.tool_call_context[id] = entry
 end
 
+local function stop_spinner_animation()
+  if spinner_timer then
+    vim.fn.timer_stop(spinner_timer)
+    spinner_timer = nil
+  end
+end
+
+local function start_spinner_animation()
+  if spinner_timer or not M.tool_spinner_active then
+    return
+  end
+  spinner_timer = vim.fn.timer_start(spinner_interval, function()
+    vim.schedule(function()
+      if not M.tool_spinner_active then
+        stop_spinner_animation()
+        return
+      end
+      M.spinner_index = (M.spinner_index % #M.spinner_frames) + 1
+      M.render()
+    end)
+  end, { ["repeat"] = -1 })
+end
+
 local function start_tool_spinner(tool)
   local label = tool.name or tool.tool or "tool"
   local args = tool.arguments or tool.args or {}
@@ -179,11 +208,13 @@ local function start_tool_spinner(tool)
   if not M.spinner_index or M.spinner_index < 1 then
     M.spinner_index = 1
   end
+  start_spinner_animation()
 end
 
 local function stop_tool_spinner()
   M.tool_spinner_active = false
   M.tool_spinner_label = nil
+  stop_spinner_animation()
 end
 
 local try_open_file
@@ -853,7 +884,7 @@ function M.finalize_streaming_message()
   end
 end
 
-function M.render()
+local function perform_render()
   if not M.result_buf or not vim.api.nvim_buf_is_valid(M.result_buf) then
     return
   end
@@ -1058,7 +1089,6 @@ function M.render()
     local frame = M.spinner_frames[M.spinner_index] or M.spinner_frames[1]
     local label = M.tool_spinner_label or "tool"
     add_line(string.format("  %s Running %s...", frame, label))
-    M.spinner_index = (M.spinner_index % #M.spinner_frames) + 1
   end
 
   ensure_separator()
@@ -1106,6 +1136,38 @@ function M.render()
       vim.api.nvim_win_set_cursor(M.result_win, { scroll_to, 0 })
     end
   end
+end
+
+local function do_render()
+  if pending_render_timer then
+    vim.fn.timer_stop(pending_render_timer)
+    pending_render_timer = nil
+  end
+  last_render_time = vim.loop.now()
+  perform_render()
+end
+
+function M.render()
+  if not M.result_buf or not vim.api.nvim_buf_is_valid(M.result_buf) then
+    return
+  end
+
+  local now = vim.loop.now()
+  local elapsed = now - last_render_time
+  if M.is_streaming and elapsed < render_debounce_ms then
+    if not pending_render_timer then
+      local wait = math.max(1, render_debounce_ms - elapsed)
+      pending_render_timer = vim.fn.timer_start(wait, function()
+        vim.schedule(function()
+          pending_render_timer = nil
+          do_render()
+        end)
+      end)
+    end
+    return
+  end
+
+  do_render()
 end
 
 function M.send_message(text)
@@ -1197,6 +1259,11 @@ end
 
 function M.close()
   autocomplete.close()
+  stop_spinner_animation()
+  if pending_render_timer then
+    vim.fn.timer_stop(pending_render_timer)
+    pending_render_timer = nil
+  end
 
   if M.event_unsub then
     M.event_unsub()
