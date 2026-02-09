@@ -1,7 +1,23 @@
 local state = require("pi.state")
 local events = require("pi.events")
+local config = require("pi.config")
 
 local M = {}
+
+local has_render_markdown = pcall(require, "render-markdown")
+local use_render_markdown = has_render_markdown and config.get("ui.use_render_markdown") ~= false
+local syntax_enabled = config.get("ui.syntax_highlighting") ~= false
+local inline_enabled = config.get("ui.inline_code_highlighting") ~= false
+
+local markdown
+local syntax
+
+if not use_render_markdown then
+  markdown = require("pi.ui.markdown")
+  if syntax_enabled then
+    syntax = require("pi.ui.syntax")
+  end
+end
 
 local HIGHLIGHT_NS = vim.api.nvim_create_namespace("pi_chat_highlights")
 local THINKING_HL = "PiChatThinking"
@@ -11,8 +27,8 @@ local DIFF_ADD_HL = "PiChatDiffAdd"
 local DIFF_DEL_HL = "PiChatDiffDel"
 
 local function safe_get_highlight(name)
-  local ok, hl = pcall(vim.api.nvim_get_hl_by_name, name, true)
-  if not ok then
+  local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
+  if not ok or not hl then
     return {}
   end
   return hl
@@ -21,24 +37,24 @@ end
 local function setup_highlights()
   local comment_hl = safe_get_highlight("Comment")
   local thinking_opts = { italic = true }
-  if comment_hl.foreground then
-    thinking_opts.fg = comment_hl.foreground
+  if comment_hl.fg then
+    thinking_opts.fg = comment_hl.fg
   end
-  if comment_hl.background then
-    thinking_opts.bg = comment_hl.background
+  if comment_hl.bg then
+    thinking_opts.bg = comment_hl.bg
   end
   vim.api.nvim_set_hl(0, THINKING_HL, thinking_opts)
 
   local normal_hl = safe_get_highlight("Normal")
   local pmenu_hl = safe_get_highlight("Pmenu")
   local user_opts = {}
-  if normal_hl.foreground then
-    user_opts.fg = normal_hl.foreground
+  if normal_hl.fg then
+    user_opts.fg = normal_hl.fg
   end
-  if pmenu_hl.background then
-    user_opts.bg = pmenu_hl.background
-  elseif pmenu_hl.foreground then
-    user_opts.bg = pmenu_hl.foreground
+  if pmenu_hl.bg then
+    user_opts.bg = pmenu_hl.bg
+  elseif pmenu_hl.fg then
+    user_opts.bg = pmenu_hl.fg
   end
   if next(user_opts) == nil then
     user_opts.bg = 0x1f1f1f
@@ -49,8 +65,8 @@ local function setup_highlights()
   local diff_del_hl = safe_get_highlight("DiffDelete")
   local function copy_highlight(src, name)
     local opts = {}
-    if src.foreground then opts.fg = src.foreground end
-    if src.background then opts.bg = src.background end
+    if src.fg then opts.fg = src.fg end
+    if src.bg then opts.bg = src.bg end
     if src.reverse then opts.reverse = src.reverse end
     if src.italic then opts.italic = src.italic end
     if src.bold then opts.bold = src.bold end
@@ -61,9 +77,33 @@ local function setup_highlights()
 
   local tool_hl = safe_get_highlight("Special")
   vim.api.nvim_set_hl(0, TOOL_RESULT_HL, {
-    fg = tool_hl.foreground or comment_hl.foreground,
-    bg = tool_hl.background or comment_hl.background,
+    fg = tool_hl.fg or comment_hl.fg,
+    bg = tool_hl.bg or comment_hl.bg,
   })
+
+  local code_bg = pmenu_hl.bg or normal_hl.bg
+  local code_block_opts = {}
+  if code_bg then
+    code_block_opts.bg = code_bg
+  end
+  vim.api.nvim_set_hl(0, "PiChatCodeBlock", code_block_opts)
+
+  local string_hl = safe_get_highlight("String")
+  local inline_opts = {}
+  if string_hl.fg then
+    inline_opts.fg = string_hl.fg
+  end
+  if code_bg then
+    inline_opts.bg = code_bg
+  end
+  vim.api.nvim_set_hl(0, "PiChatInlineCode", inline_opts)
+
+  local fence_opts = {}
+  if comment_hl.fg then
+    fence_opts.fg = comment_hl.fg
+  end
+  fence_opts.italic = true
+  vim.api.nvim_set_hl(0, "PiChatCodeFence", fence_opts)
 end
 
 setup_highlights()
@@ -391,15 +431,15 @@ function M._show_connection_error(err)
 end
 
 function M.setup_input_buffer()
-  vim.api.nvim_buf_set_keymap(M.input_buf, "n", "<CR>", "", {
-    noremap = true, silent = true, callback = function() M.submit() end,
-  })
-  vim.api.nvim_buf_set_keymap(M.input_buf, "i", "<CR>", "", {
-    noremap = true, silent = true, callback = function() M.submit() end,
-  })
-  vim.api.nvim_buf_set_keymap(M.input_buf, "n", "q", "<cmd>PiChat<CR>", { noremap = true, silent = true })
-  vim.api.nvim_buf_set_keymap(M.result_buf, "n", "q", "<cmd>PiChat<CR>", { noremap = true, silent = true })
-  vim.api.nvim_buf_set_keymap(M.input_buf, "i", "<S-CR>", "<CR>", { noremap = true, silent = true })
+  vim.keymap.set("n", "<CR>", function()
+    M.submit()
+  end, { buffer = M.input_buf, silent = true })
+  vim.keymap.set("i", "<CR>", function()
+    M.submit()
+  end, { buffer = M.input_buf, silent = true })
+  vim.keymap.set("n", "q", "<cmd>PiChat<CR>", { buffer = M.input_buf, silent = true })
+  vim.keymap.set("n", "q", "<cmd>PiChat<CR>", { buffer = M.result_buf, silent = true })
+  vim.keymap.set("i", "<S-CR>", "<CR>", { buffer = M.input_buf, silent = true })
 
   vim.api.nvim_buf_set_lines(M.input_buf, 0, -1, false, { "Type your message..." })
   vim.api.nvim_buf_set_option(M.input_buf, "modifiable", true)
@@ -673,28 +713,49 @@ function M.render()
   end
 
   local lines = {}
-  local highlights = {}
+  local line_highlights = {}
+  local range_highlights = {}
 
   local width = 40
   if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
     width = math.max(40, vim.api.nvim_win_get_width(M.result_win) - 4)
   end
+
   local function add_line(text, hl)
-    table.insert(lines, text)
+    table.insert(lines, text or "")
+    local idx = #lines - 1
     if hl then
-      table.insert(highlights, { line = #lines - 1, group = hl })
+      table.insert(line_highlights, { line = idx, group = hl })
     end
+    return idx
   end
+
+  local function add_range_highlight(line, col_start, col_end, group)
+    if line == nil or col_start == nil or col_end == nil or not group then
+      return
+    end
+    if col_end <= col_start then
+      return
+    end
+    table.insert(range_highlights, {
+      line = line,
+      col_start = col_start,
+      col_end = col_end,
+      group = group,
+    })
+  end
+
   local function ensure_separator()
     if #lines == 0 or lines[#lines] == "" then
       return
     end
-    table.insert(lines, "")
+    add_line("", nil)
   end
+
   local function split_text(text)
-    text = text or ""
-    return vim.split(text, "\n", { plain = true })
+    return vim.split(text or "", "\n", { plain = true })
   end
+
   local function thinking_line_count(text)
     local parts = split_text(text)
     while #parts > 0 and parts[#parts] == "" do
@@ -702,6 +763,7 @@ function M.render()
     end
     return #parts
   end
+
   local function add_message_lines(content, hl, line_highlighter)
     for _, line in ipairs(split_text(content)) do
       local applied = hl
@@ -717,17 +779,97 @@ function M.render()
     end
   end
 
-  local function diff_line_highlight(line)
-    if line:match("^%s*%+") then
-      return DIFF_ADD_HL
+  local function strip_thinking(content, thinking)
+    thinking = thinking or ""
+    content = content or ""
+    if thinking == "" then
+      return content
     end
-    if line:match("^%s*-") then
-      return DIFF_DEL_HL
+    local prefix = thinking .. "\n\n"
+    if content:sub(1, #prefix) == prefix then
+      return content:sub(#prefix + 1)
     end
-    return nil
+    return content
   end
 
-  -- Status line
+  local function render_assistant_markdown(msg)
+    local thinking = msg.thinking or ""
+    if thinking ~= "" then
+      for _, line in ipairs(split_text(thinking)) do
+        add_line("  > " .. line, THINKING_HL)
+      end
+      add_line("", nil)
+    end
+    local body = strip_thinking(msg.content or "", thinking)
+    for _, line in ipairs(split_text(body)) do
+      add_line("  " .. line)
+    end
+  end
+
+  local function render_assistant_custom(msg)
+    local thinking_left = thinking_line_count(msg.thinking or "")
+    local blocks = markdown.parse(msg.content or "", msg.streaming)
+
+    for _, block in ipairs(blocks) do
+      if block.type == "code" then
+        local header = block.lang and ("  ```" .. block.lang) or "  ```"
+        add_line(header, "PiChatCodeFence")
+        local code_start = #lines
+        for _, code_line in ipairs(vim.split(block.content or "", "\n", { plain = true })) do
+          add_line("  " .. code_line, "PiChatCodeBlock")
+        end
+        if syntax and block.lang and block.lang ~= "" then
+          local highlights = syntax.get_highlights(block.content or "", block.lang)
+          for _, hl in ipairs(highlights) do
+            local target_line = code_start + hl.line
+            add_range_highlight(target_line, 2 + hl.col_start, 2 + hl.col_end, hl.hl_group)
+          end
+        end
+        if block.incomplete then
+          add_line("  ``` (streaming...)", "PiChatCodeFence")
+        else
+          add_line("  ```", "PiChatCodeFence")
+        end
+      elseif block.type == "text_with_inline" then
+        local line_hl
+        if thinking_left > 0 then
+          line_hl = THINKING_HL
+          thinking_left = thinking_left - 1
+        end
+        local text = "  "
+        local cursor = #text
+        local inline_ranges = {}
+        for _, segment in ipairs(block.segments or {}) do
+          local segment_text = segment.content or ""
+          if inline_enabled and segment.type == "code" then
+            table.insert(inline_ranges, { start = cursor, end_col = cursor + #segment_text })
+          end
+          text = text .. segment_text
+          cursor = cursor + #segment_text
+        end
+        local line_idx = add_line(text, line_hl)
+        for _, rng in ipairs(inline_ranges) do
+          add_range_highlight(line_idx, rng.start, rng.end_col, "PiChatInlineCode")
+        end
+      else
+        local line_hl
+        if thinking_left > 0 then
+          line_hl = THINKING_HL
+          thinking_left = thinking_left - 1
+        end
+        add_line("  " .. (block.content or ""), line_hl)
+      end
+    end
+  end
+
+  local function render_assistant(msg)
+    if use_render_markdown then
+      render_assistant_markdown(msg)
+    else
+      render_assistant_custom(msg)
+    end
+  end
+
   local status_parts = {}
   if M.session_info.model then
     local model_name = M.session_info.model:match("([^/]+)$") or M.session_info.model
@@ -745,7 +887,6 @@ function M.render()
     add_line("  " .. string.rep("─", width - 2))
   end
 
-  -- Messages
   for _, msg in ipairs(M.messages) do
     ensure_separator()
 
@@ -753,12 +894,7 @@ function M.render()
       add_message_lines(msg.content, USER_PROMPT_HL)
 
     elseif msg.role == "assistant" then
-      local content_lines = split_text(msg.content)
-      local highlight_count = thinking_line_count(msg.thinking)
-      for idx, line in ipairs(content_lines) do
-        local line_hl = (highlight_count > 0 and idx <= highlight_count) and THINKING_HL or nil
-        add_line("  " .. line, line_hl)
-      end
+      render_assistant(msg)
 
     elseif msg.role == "tool" then
       add_message_lines(msg.content)
@@ -767,7 +903,7 @@ function M.render()
       add_message_lines(msg.content, TOOL_RESULT_HL, diff_line_highlight)
 
     elseif msg.role == "system" then
-      add_line("  ⚠️  " .. msg.content)
+      add_line("  ⚠️  " .. (msg.content or ""))
     end
   end
 
@@ -788,8 +924,33 @@ function M.render()
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
 
   vim.api.nvim_buf_clear_namespace(M.result_buf, HIGHLIGHT_NS, 0, -1)
-  for _, hl in ipairs(highlights) do
+  for _, hl in ipairs(line_highlights) do
     vim.api.nvim_buf_add_highlight(M.result_buf, HIGHLIGHT_NS, hl.group, hl.line, 0, -1)
+  end
+
+  local function apply_range(entry)
+    if not entry or entry.line == nil or not entry.group then
+      return
+    end
+    local has_highlight = vim.highlight and vim.highlight.range
+    if has_highlight then
+      vim.highlight.range(
+        M.result_buf,
+        HIGHLIGHT_NS,
+        entry.group,
+        { entry.line, entry.col_start },
+        { entry.line, entry.col_end }
+      )
+    else
+      vim.api.nvim_buf_set_extmark(M.result_buf, HIGHLIGHT_NS, entry.line, entry.col_start, {
+        end_col = entry.col_end,
+        hl_group = entry.group,
+      })
+    end
+  end
+
+  for _, entry in ipairs(range_highlights) do
+    apply_range(entry)
   end
 
   if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
