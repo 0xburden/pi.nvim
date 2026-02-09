@@ -1,8 +1,11 @@
 local state = require("pi.state")
 local events = require("pi.events")
 local config = require("pi.config")
+local commands = require("pi.rpc.commands")
+local autocomplete = require("pi.ui.autocomplete")
 
 local M = {}
+local commands_loading = false
 
 local has_render_markdown = pcall(require, "render-markdown")
 local use_render_markdown = has_render_markdown and config.get("ui.use_render_markdown") ~= false
@@ -431,15 +434,70 @@ function M._show_connection_error(err)
 end
 
 function M.setup_input_buffer()
-  vim.keymap.set("n", "<CR>", function()
+  local autocomplete_enabled = config.get("ui.autocomplete_enabled") ~= false
+  local function handle_enter()
+    if autocomplete_enabled and autocomplete.is_open() then
+      M.accept_autocomplete()
+      return
+    end
     M.submit()
-  end, { buffer = M.input_buf, silent = true })
-  vim.keymap.set("i", "<CR>", function()
-    M.submit()
-  end, { buffer = M.input_buf, silent = true })
+  end
+
+  vim.keymap.set("n", "<CR>", handle_enter, { buffer = M.input_buf, silent = true })
+  vim.keymap.set("i", "<CR>", handle_enter, { buffer = M.input_buf, silent = true })
   vim.keymap.set("n", "q", "<cmd>PiChat<CR>", { buffer = M.input_buf, silent = true })
   vim.keymap.set("n", "q", "<cmd>PiChat<CR>", { buffer = M.result_buf, silent = true })
   vim.keymap.set("i", "<S-CR>", "<CR>", { buffer = M.input_buf, silent = true })
+
+  if autocomplete_enabled then
+    local termcodes = vim.api.nvim_replace_termcodes
+
+    vim.keymap.set("i", "<C-n>", function()
+      if autocomplete.is_open() then
+        autocomplete.select_next()
+        return ""
+      end
+      return termcodes("<C-n>", true, false, true)
+    end, { buffer = M.input_buf, expr = true, silent = true })
+
+    vim.keymap.set("i", "<C-p>", function()
+      if autocomplete.is_open() then
+        autocomplete.select_prev()
+        return ""
+      end
+      return termcodes("<C-p>", true, false, true)
+    end, { buffer = M.input_buf, expr = true, silent = true })
+
+    vim.keymap.set("i", "<Tab>", function()
+      if autocomplete.is_open() then
+        M.accept_autocomplete()
+        return ""
+      end
+      return termcodes("<Tab>", true, false, true)
+    end, { buffer = M.input_buf, expr = true, silent = true })
+
+    vim.keymap.set("i", "<Esc>", function()
+      if autocomplete.is_open() then
+        autocomplete.close()
+        return ""
+      end
+      return "<Esc>"
+    end, { buffer = M.input_buf, expr = true, silent = true })
+
+    vim.api.nvim_create_autocmd({ "TextChangedI", "TextChanged" }, {
+      buffer = M.input_buf,
+      callback = function()
+        M.handle_text_change()
+      end,
+    })
+
+    vim.api.nvim_create_autocmd("BufLeave", {
+      buffer = M.input_buf,
+      callback = function()
+        autocomplete.close()
+      end,
+    })
+  end
 
   vim.api.nvim_buf_set_lines(M.input_buf, 0, -1, false, { "Type your message..." })
   vim.api.nvim_buf_set_option(M.input_buf, "modifiable", true)
@@ -461,6 +519,8 @@ function M.submit()
     return
   end
 
+  autocomplete.close()
+
   local lines = vim.api.nvim_buf_get_lines(M.input_buf, 0, -1, false)
   local text = table.concat(lines, "\n")
 
@@ -470,6 +530,133 @@ function M.submit()
 
   M.send_message(text)
   vim.api.nvim_buf_set_lines(M.input_buf, 0, -1, false, { "" })
+end
+
+function M.handle_text_change()
+  if config.get("ui.autocomplete_enabled") == false then
+    return
+  end
+
+  if not M.input_win or not vim.api.nvim_win_is_valid(M.input_win) then
+    autocomplete.close()
+    return
+  end
+
+  if not M.input_buf or not vim.api.nvim_buf_is_valid(M.input_buf) then
+    autocomplete.close()
+    return
+  end
+
+  local ok, cursor = pcall(vim.api.nvim_win_get_cursor, M.input_win)
+  if not ok or not cursor then
+    autocomplete.close()
+    return
+  end
+
+  local line = vim.api.nvim_buf_get_lines(M.input_buf, cursor[1] - 1, cursor[1], false)[1] or ""
+  local before_cursor = line:sub(1, cursor[2])
+  local slash_match = before_cursor:match("^%s*/([%w_%-]*)$") or before_cursor:match("%s+/([%w_%-]*)$")
+  if not slash_match then
+    autocomplete.close()
+    return
+  end
+
+  local width = math.floor(vim.api.nvim_win_get_width(M.input_win) * 0.8)
+  local cached = commands.get_cached()
+
+  if #cached == 0 then
+    if commands_loading then
+      return
+    end
+    commands_loading = true
+
+    autocomplete.set_items({ { name = "/...", description = "Loading commands...", source = "system" } })
+    if not autocomplete.is_open() then
+      autocomplete.open(M.input_win, cursor[1], cursor[2], width)
+    else
+      autocomplete.render()
+    end
+
+    local client = state.get("rpc_client")
+    if not client then
+      commands_loading = false
+      autocomplete.close()
+      return
+    end
+
+    commands.get_all(client, function(result)
+      vim.schedule(function()
+        commands_loading = false
+        if result and result.error then
+          autocomplete.close()
+          return
+        end
+
+        if not M.input_win or not vim.api.nvim_win_is_valid(M.input_win) then
+          autocomplete.close()
+          return
+        end
+        if not M.input_buf or not vim.api.nvim_buf_is_valid(M.input_buf) then
+          autocomplete.close()
+          return
+        end
+
+        local current_cursor = vim.api.nvim_win_get_cursor(M.input_win)
+        local current_line = vim.api.nvim_buf_get_lines(M.input_buf, current_cursor[1] - 1, current_cursor[1], false)[1] or ""
+        local current_before = current_line:sub(1, current_cursor[2])
+        local current_match = current_before:match("^%s*/([%w_%-]*)$") or current_before:match("%s+/([%w_%-]*)$")
+        if current_match then
+          autocomplete.filter(current_match)
+          local new_width = math.floor(vim.api.nvim_win_get_width(M.input_win) * 0.8)
+          if not autocomplete.is_open() then
+            autocomplete.open(M.input_win, current_cursor[1], current_cursor[2], new_width)
+          else
+            autocomplete.render()
+          end
+        else
+          autocomplete.close()
+        end
+      end)
+    end)
+
+    return
+  end
+
+  autocomplete.filter(slash_match)
+  if not autocomplete.is_open() then
+    autocomplete.open(M.input_win, cursor[1], cursor[2], width)
+  else
+    autocomplete.render()
+  end
+end
+
+function M.accept_autocomplete()
+  local selected = autocomplete.get_selected()
+  if not selected then
+    autocomplete.close()
+    return
+  end
+
+  if not M.input_win or not vim.api.nvim_win_is_valid(M.input_win) then
+    autocomplete.close()
+    return
+  end
+  if not M.input_buf or not vim.api.nvim_buf_is_valid(M.input_buf) then
+    autocomplete.close()
+    return
+  end
+
+  local cursor = vim.api.nvim_win_get_cursor(M.input_win)
+  local line = vim.api.nvim_buf_get_lines(M.input_buf, cursor[1] - 1, cursor[1], false)[1] or ""
+  local before_cursor = line:sub(1, cursor[2])
+  local prefix = before_cursor:match("^(.*)/[%w_%-]*$") or before_cursor
+  local after_cursor = line:sub(cursor[2] + 1)
+  local command_name = selected.name or ""
+  local replacement = prefix .. command_name .. " " .. after_cursor
+  vim.api.nvim_buf_set_lines(M.input_buf, cursor[1] - 1, cursor[1], false, { replacement })
+  local new_col = #prefix + #command_name + 1
+  vim.api.nvim_win_set_cursor(M.input_win, { cursor[1], new_col })
+  autocomplete.close()
 end
 
 function M.subscribe_to_events()
@@ -1050,6 +1237,8 @@ function M.load_history()
 end
 
 function M.close()
+  autocomplete.close()
+
   if M.event_unsub then
     M.event_unsub()
     M.event_unsub = nil
