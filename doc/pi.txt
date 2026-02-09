@@ -52,6 +52,18 @@ Default configuration: >lua
       auto_open_panel = true,
       auto_open_logs = false,
       approval_mode = true,
+      ui = {
+        code_block_bg = "auto",        -- "auto", "none", "#RRGGBB", or numeric hex
+        syntax_highlighting = true,      -- Custom renderer only
+        inline_code_highlighting = true, -- Custom renderer only
+        use_render_markdown = true,      -- Enable render-markdown.nvim, if available
+        autocomplete_enabled = true,
+        autocomplete_fuzzy = true,
+        autocomplete_max_items = 10,
+        respect_colorscheme = true,
+        respect_user_highlights = true,
+        custom_highlights = {},
+      },
       
       keymaps = {
         toggle_panel = "<leader>pt",
@@ -68,28 +80,34 @@ COMMANDS                                                         *pi-commands|
 :PiConnect                                                       *:PiConnect*
     Connect to Pi RPC server
 
-:PiDisconnect                                                 *:PiDisconnect*
+:PiDisconnect                                                    *:PiDisconnect*
     Disconnect from Pi RPC server
 
 :PiStart {task}                                                   *:PiStart*
     Start Pi agent with the given task description
 
-:PiPause                                                           *:PiPause*
-    Pause the running agent
+:PiSteer {message}                                                *:PiSteer*
+    Interrupt the current run with new instructions
 
-:PiResume                                                         *:PiResume*
-    Resume a paused agent
+:PiFollowUp {message}                                             *:PiFollowUp*
+    Queue a follow-up message to be processed once the agent finishes
 
-:PiStop                                                             *:PiStop*
-    Stop the running agent
+:PiAbort                                                         *:PiAbort*
+    Abort the current agent operation immediately
 
 :PiToggle                                                         *:PiToggle*
     Toggle the control panel
 
-:PiLogs                                                             *:PiLogs*
+:PiLogs                                                           *:PiLogs*
     Toggle the logs viewer
 
-:PiDiff [file]                                                      *:PiDiff*
+:PiPalette                                                        *:PiPalette*
+    Open the Pi command palette (Ctrl+P style list of extensions/prompts/skills)
+
+:PiChat                                                           *:PiChat*
+    Open the chat interface for streaming responses
+
+:PiDiff [file]                                                    *:PiDiff*
     Show diff for file (defaults to current file)
 
 :PiApprove                                                       *:PiApprove*
@@ -98,14 +116,35 @@ COMMANDS                                                         *pi-commands|
 :PiReject                                                         *:PiReject*
     Reject the current pending change
 
-:PiSessionList                                               *:PiSessionList*
+:PiSessionList                                                   *:PiSessionList*
     List available sessions
 
-:PiSessionLoad {id}                                          *:PiSessionLoad*
+:PiSessionLoad {id}                                              *:PiSessionLoad*
     Load a specific session
 
-:PiSessionSave [name]                                        *:PiSessionSave*
+:PiSessionSave [name]                                            *:PiSessionSave*
     Save the current session
+
+===============================================================================
+CHAT INTERFACE                                                   *pi-chat|
+
+The chat window uses a vertical split plus a bottom input buffer. The assistant
+messages are rendered with syntax-highlighted code fences, optional inline
+code highlights, and italicized thinking text. When `render-markdown.nvim` is
+installed and enabled via `ui.use_render_markdown`, the chat buffer simply sets
+`filetype=markdown` so the plugin handles rendering for you automatically.
+
+Typing `/` in the input while autocomplete is enabled opens a floating command
+palette that filters Pi commands (extensions, prompts, skills) in real time.
+Navigate the list with `Ctrl+N`/`Ctrl+P`, `Tab`/`Shift+Tab`, or the arrow keys.
+Press `Tab`/`Enter` to accept a command; this also shows a timed parameter hint
+overlay with argument information for that command. Press `Esc` to close the
+autocomplete/hint window and keep typing.
+
+Use `ui.autocomplete_fuzzy`, `ui.autocomplete_max_items`, and
+`ui.autocomplete_enabled` to tweak the inline palette behavior. The
+`:PiPalette` command exposes a global command list (Ctrl+P style) to run any Pi
+extension/prompt/skill regardless of the current slash input.
 
 ===============================================================================
 API                                                                   *:pi-api|
