@@ -38,16 +38,18 @@ local function parse_with_treesitter(text)
     return nil
   end
 
+  local lines = vim.split(normalized, "\n", { plain = true })
   local blocks = {}
   local current_block
 
   for id, node in query:iter_captures(root, normalized) do
     local capture = query.captures[id]
     if capture == "block" then
-      local start_row, _, end_row = node:range()
+      local start_row, _, end_row, end_col = node:range()
+      local block_end = end_col and end_col > 0 and end_row or math.max(0, (end_row or start_row + 1) - 1)
       current_block = {
         block_start = start_row,
-        block_end = end_row or start_row + 1,
+        block_end = block_end,
         lang = nil,
         content = nil,
         incomplete = false,
@@ -64,6 +66,10 @@ local function parse_with_treesitter(text)
   local filtered = {}
   for _, block in ipairs(blocks) do
     if block.content and not block.content:match("^```%s*$") then
+      local closing_line = lines[block.block_end + 1]
+      if not closing_line or not closing_line:match("^%s*```%s*$") then
+        block.incomplete = true
+      end
       table.insert(filtered, block)
     end
   end
@@ -142,10 +148,10 @@ local function build_result_blocks(text, ts_blocks)
         content = block.content or "",
         lang = block.lang,
         start_line = line_idx,
-        end_line = block.block_end,
+        end_line = (block.block_end or line_idx) + 1,
         incomplete = block.incomplete or false,
       })
-      line_idx = (block.block_end or line_idx) + 1
+      line_idx = (block.block_end or line_idx) + 2
       block_idx = block_idx + 1
     else
       local line = lines[line_idx] or ""
@@ -162,6 +168,13 @@ function M.parse(text, allow_incomplete)
   if has_ts_markdown then
     local ts_blocks = parse_with_treesitter(text)
     if ts_blocks then
+      if not allow_incomplete then
+        for _, block in ipairs(ts_blocks) do
+          if block.incomplete then
+            return M.parse_regex(text, allow_incomplete)
+          end
+        end
+      end
       return build_result_blocks(text, ts_blocks)
     end
   end

@@ -24,6 +24,7 @@ if not use_render_markdown then
 end
 
 local HIGHLIGHT_NS = vim.api.nvim_create_namespace("pi_chat_highlights")
+local HIGHLIGHT_AUGROUP = vim.api.nvim_create_augroup("PiChatHighlights", { clear = true })
 local THINKING_HL = "PiChatThinking"
 local USER_PROMPT_HL = "PiChatUserPrompt"
 local TOOL_RESULT_HL = "PiChatToolResult"
@@ -36,8 +37,30 @@ local pending_render_timer
 local spinner_interval = 100
 local spinner_timer
 
+local respect_user_highlights = config.get("ui.respect_user_highlights") ~= false
+local respect_colorscheme = config.get("ui.respect_colorscheme") ~= false
+local custom_highlights = config.get("ui.custom_highlights") or {}
+
+local function resolve_code_bg()
+  local setting = config.get("ui.code_block_bg")
+  if setting == "none" then
+    return nil
+  end
+  if type(setting) == "string" then
+    if setting ~= "" and setting ~= "auto" then
+      local num = tonumber(setting:gsub("#", ""), 16)
+      if num then
+        return num
+      end
+    end
+  elseif type(setting) == "number" then
+    return setting
+  end
+  return colors.get_code_bg()
+end
+
 local function setup_highlights()
-  local code_bg = colors.get_code_bg()
+  local code_bg = resolve_code_bg()
   local user_bg = colors.get_user_message_bg()
   local highlights = {
     [THINKING_HL] = {
@@ -69,12 +92,36 @@ local function setup_highlights()
     },
   }
 
+  for name, def in pairs(custom_highlights) do
+    if highlights[name] then
+      highlights[name] = vim.tbl_deep_extend("force", highlights[name], def)
+    else
+      highlights[name] = def
+    end
+  end
+
   for name, def in pairs(highlights) do
+    if respect_user_highlights and not custom_highlights[name] and colors.has_user_colors(name) then
+      goto continue
+    end
     colors.apply_highlight(name, def)
+    ::continue::
   end
 end
 
 setup_highlights()
+
+if respect_colorscheme then
+  vim.api.nvim_create_autocmd("ColorScheme", {
+    group = HIGHLIGHT_AUGROUP,
+    callback = function()
+      setup_highlights()
+      if M.is_open() then
+        M.render()
+      end
+    end,
+  })
+end
 
 -- Window/buffer handles
 M.result_buf = nil
@@ -975,6 +1022,18 @@ local function perform_render()
       end
       add_line(line_text, applied)
     end
+  end
+
+  local function diff_line_highlight(line)
+    if not line then
+      return nil
+    end
+    if line:match("^%s*%+") then
+      return DIFF_ADD_HL
+    elseif line:match("^%s*%-") then
+      return DIFF_DEL_HL
+    end
+    return nil
   end
 
   local function strip_thinking(content, thinking)
