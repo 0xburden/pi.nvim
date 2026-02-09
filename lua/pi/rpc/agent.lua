@@ -134,6 +134,7 @@ function M.status(client, callback)
         state.update("agent.message_count", data.messageCount)
         state.update("agent.pending_message_count", data.pendingMessageCount)
         state.update("agent.auto_compaction", data.autoCompactionEnabled)
+        state.update("agent.auto_retry", data.autoRetryEnabled)
         state.update("agent.steering_mode", data.steeringMode)
         state.update("agent.follow_up_mode", data.followUpMode)
       end

@@ -32,6 +32,8 @@ Native Neovim integration for the [Pi coding agent](https://github.com/badlogic/
       keymaps = {
         toggle_panel = "<leader>pt",
         toggle_logs = "<leader>pl",
+        toggle_chat = "<leader>pc",
+        attach_image = "<leader>pI",
         approve = "<leader>pa",
         reject = "<leader>pr",
       }
@@ -97,6 +99,8 @@ use {
 | `:PiStop` | Stop the running agent |
 | `:PiToggle` | Toggle control panel |
 | `:PiLogs` | Toggle logs viewer |
+| `:PiChat` | Toggle chat interface |
+| `:PiChatAttach [file]` | Attach png/jpeg to next chat prompt |
 | `:PiDiff [file]` | Show diff for file |
 | `:PiApprove` | Approve pending change |
 | `:PiReject` | Reject pending change |
@@ -126,11 +130,23 @@ require("pi").setup({
   -- Display settings
   max_log_entries = 1000,
   log_format = "timestamp",
+
+  -- Chat/UI options
+  ui = {
+    streaming_prompt_default = "follow_up",
+    show_tool_streaming = true,
+    show_retry_status = true,
+    show_compaction_status = true,
+    extension_status_panel = true,
+    allow_image_attachments = true,
+  },
   
   -- Keymaps (set to false to disable)
   keymaps = {
     toggle_panel = "<leader>pt",
     toggle_logs = "<leader>pl",
+    toggle_chat = "<leader>pc",
+    attach_image = "<leader>pI",
     approve = "<leader>pa",
     reject = "<leader>pr",
   }
