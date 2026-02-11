@@ -9,22 +9,23 @@ local image_utils = require("pi.util.images")
 local M = {}
 local commands_loading = false
 
-local has_render_markdown = pcall(require, "render-markdown")
-local use_render_markdown = has_render_markdown and config.get("ui.use_render_markdown") ~= false
+local use_render_markdown = false
 local syntax_enabled = config.get("ui.syntax_highlighting") ~= false
 local inline_enabled = config.get("ui.inline_code_highlighting") ~= false
+
+-- Register markdown treesitter parser for our custom filetype (like avante.nvim)
+vim.treesitter.language.register("markdown", "PiChat")
 
 local markdown
 local syntax
 
-if not use_render_markdown then
-  markdown = require("pi.ui.markdown")
-  if syntax_enabled then
-    syntax = require("pi.ui.syntax")
-  end
+markdown = require("pi.ui.markdown")
+if syntax_enabled then
+  syntax = require("pi.ui.syntax")
 end
 
 local HIGHLIGHT_NS = vim.api.nvim_create_namespace("pi_chat_highlights")
+local INPUT_STATUS_NS = vim.api.nvim_create_namespace("pi_chat_input_status")
 local HIGHLIGHT_AUGROUP = vim.api.nvim_create_augroup("PiChatHighlights", { clear = true })
 local THINKING_HL = "PiChatThinking"
 local USER_PROMPT_HL = "PiChatUserPrompt"
@@ -473,6 +474,7 @@ local function stop_tool_spinner()
 end
 
 local try_open_file
+local render_input_status
 
 local function flush_pending_file_paths()
   if not next(M.pending_file_paths) then
@@ -595,9 +597,7 @@ function M._open_ui()
   local origin_win = vim.api.nvim_get_current_win()
 
   M.result_buf = get_or_create_buf(M.RESULT_BUF_NAME, true)
-  if use_render_markdown then
-    pcall(vim.api.nvim_buf_set_option, M.result_buf, "filetype", "markdown")
-  end
+  vim.api.nvim_buf_set_option(M.result_buf, "filetype", "PiChat")
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
   vim.api.nvim_buf_set_option(M.result_buf, "wrap", true)
   vim.api.nvim_buf_set_option(M.result_buf, "linebreak", true)
@@ -617,8 +617,10 @@ function M._open_ui()
   vim.api.nvim_win_set_option(M.result_win, "signcolumn", "no")
   vim.api.nvim_win_set_option(M.result_win, "foldcolumn", "0")
   vim.api.nvim_win_set_option(M.result_win, "colorcolumn", "")
+  vim.api.nvim_win_set_option(M.result_win, "conceallevel", 2)
+  vim.api.nvim_win_set_option(M.result_win, "concealcursor", "nvi")
 
-  vim.cmd("belowright 3split")
+  vim.cmd("belowright 6split")
   M.input_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(M.input_win, M.input_buf)
   vim.api.nvim_win_set_option(M.input_win, "wrap", true)
@@ -627,6 +629,7 @@ function M._open_ui()
   vim.api.nvim_win_set_option(M.input_win, "signcolumn", "no")
   vim.api.nvim_win_set_option(M.input_win, "foldcolumn", "0")
   vim.api.nvim_win_set_option(M.input_win, "colorcolumn", "")
+  vim.api.nvim_win_set_option(M.input_win, "winhighlight", "WinSeparator:Normal")
 
   M.setup_input_buffer()
   M.subscribe_to_events()
@@ -636,6 +639,7 @@ function M._open_ui()
 
   M.origin_win = origin_win
   state.update("ui.chat_open", true)
+  render_input_status()
 end
 
 function M._show_connecting_state()
@@ -696,6 +700,14 @@ function M.setup_input_buffer()
   vim.keymap.set("n", "q", "<cmd>PiChat<CR>", { buffer = M.input_buf, silent = true })
   vim.keymap.set("n", "q", "<cmd>PiChat<CR>", { buffer = M.result_buf, silent = true })
   vim.keymap.set("i", "<S-CR>", "<CR>", { buffer = M.input_buf, silent = true })
+
+  -- Model selection keybindings (input buffer only to avoid overriding scroll keys)
+  vim.keymap.set({ "n", "i" }, "<C-e>", function()
+    require("pi.ui.model_selector").open()
+  end, { buffer = M.input_buf, silent = true, desc = "Select model" })
+  vim.keymap.set({ "n", "i" }, "<C-t>", function()
+    require("pi.ui.model_selector").open_thinking_level()
+  end, { buffer = M.input_buf, silent = true, desc = "Select thinking level" })
 
   if config.get("ui.allow_image_attachments") ~= false then
     vim.keymap.set({ "n", "i" }, "<C-g>", function()
@@ -764,6 +776,7 @@ function M.setup_input_buffer()
       if #lines == 1 and lines[1] == "Type your message..." then
         vim.api.nvim_buf_set_lines(M.input_buf, 0, -1, false, { "" })
       end
+      render_input_status()
     end,
   })
 end
@@ -772,6 +785,53 @@ local function clear_input_buffer()
   if M.input_buf and vim.api.nvim_buf_is_valid(M.input_buf) then
     vim.api.nvim_buf_set_lines(M.input_buf, 0, -1, false, { "" })
   end
+end
+
+--- Handle slash commands that should be intercepted locally (not sent to the agent).
+--- Returns true if the input was handled, false otherwise.
+local function handle_local_slash_command(text)
+  local trimmed = vim.trim(text)
+
+  -- /model [filter] — open the model selector, optionally pre-filtered
+  if trimmed == "/model" or trimmed:match("^/model%s+") then
+    local model_arg = trimmed:match("^/model%s+(.+)") or ""
+    clear_input_buffer()
+    local model_picker = require("pi.ui.model_picker")
+    local filter = (model_arg ~= "") and model_arg or nil
+    model_picker.open({ filter = filter, anchor_win = M.input_win })
+    return true
+  end
+
+  -- /thinking [level] — open thinking level selector or set directly
+  local thinking_match = trimmed == "/thinking" or trimmed:match("^/thinking%s+")
+  local thinking_arg = thinking_match and (trimmed:match("^/thinking%s+(.+)") or "") or nil
+  if thinking_match then
+    clear_input_buffer()
+    if thinking_arg ~= "" then
+      -- Direct set: /thinking high
+      local client = state.get("rpc_client")
+      if client and client.connected then
+        local model_rpc = require("pi.rpc.model")
+        model_rpc.set_thinking_level(client, thinking_arg, function(result)
+          vim.schedule(function()
+            if result and result.success then
+              vim.notify("Pi: Thinking level set to " .. thinking_arg, vim.log.levels.INFO)
+              M.render()
+            else
+              vim.notify("Pi: Failed to set thinking level - " .. (result and result.error or "unknown"), vim.log.levels.ERROR)
+            end
+          end)
+        end)
+      else
+        vim.notify("Pi: Not connected to agent", vim.log.levels.ERROR)
+      end
+    else
+      require("pi.ui.model_selector").open_thinking_level()
+    end
+    return true
+  end
+
+  return false
 end
 
 function M.submit()
@@ -785,6 +845,11 @@ function M.submit()
   local text = table.concat(lines, "\n")
 
   if text == "Type your message..." or text:match("^%s*$") then
+    return
+  end
+
+  -- Intercept local slash commands before sending to agent
+  if handle_local_slash_command(text) then
     return
   end
 
@@ -1048,24 +1113,21 @@ function M.handle_event(event)
     M.tool_streams = {}
     stop_tool_spinner()
 
+  elseif event_type == "disconnected" then
+    M.is_streaming = false
+    M.finalize_streaming_message()
+    stop_tool_spinner()
+    M.add_message("system", "Agent disconnected (exit code: " .. tostring(event.exit_code or "?") .. ")", false)
+
+  elseif event_type == "reconnected" then
+    M.add_message("system", "Agent reconnected", false)
+    M.load_history()
+
   elseif event_type == "turn_start" then
-    local label = event.turnId or event.turn or event.id
-    local message_text = "Turn started"
-    if label then
-      message_text = message_text .. " (" .. tostring(label) .. ")"
-    end
-    M.add_message("system", message_text, false)
+    -- silently ignored in chat UI
 
   elseif event_type == "turn_end" then
-    local reason = event.reason or event.stopReason or event.error or event.finalError
-    local message_text = "Turn ended"
-    if event.aborted then
-      message_text = message_text .. " (aborted)"
-    end
-    if reason then
-      message_text = message_text .. ": " .. tostring(reason)
-    end
-    M.add_message("system", message_text, false)
+    -- silently ignored in chat UI
 
   elseif event_type == "tool_execution_start" then
     local tool_id = event.toolCallId
@@ -1354,6 +1416,63 @@ function M.finalize_streaming_message()
   end
 end
 
+render_input_status = function()
+  if not M.input_buf or not vim.api.nvim_buf_is_valid(M.input_buf) then
+    return
+  end
+
+  vim.api.nvim_buf_clear_namespace(M.input_buf, INPUT_STATUS_NS, 0, -1)
+
+  local virt_lines = {}
+
+  local status_parts = {}
+  if M.session_info.model then
+    local model_name = M.session_info.model:match("([^/]+)$") or M.session_info.model
+    table.insert(status_parts, "model: " .. model_name)
+  end
+  if M.session_info.tokens.input > 0 or M.session_info.tokens.output > 0 then
+    table.insert(status_parts, string.format("%.1fk/%.1fk", M.session_info.tokens.input / 1000, M.session_info.tokens.output / 1000))
+  end
+  if M.is_streaming then
+    table.insert(status_parts, "● working")
+  end
+  if #M.pending_images > 0 then
+    table.insert(status_parts, string.format("%d image(s) attached", #M.pending_images))
+  end
+  local sep_width = 40
+  if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
+    sep_width = vim.api.nvim_win_get_width(M.input_win)
+  end
+  local sep_line = string.rep("─", sep_width)
+
+  -- Top separator (above input line)
+  vim.api.nvim_buf_set_extmark(M.input_buf, INPUT_STATUS_NS, 0, 0, {
+    virt_lines = { { { sep_line, THINKING_HL } } },
+    virt_lines_above = true,
+  })
+
+  -- Bottom separator (below input line)
+  table.insert(virt_lines, { { sep_line, THINKING_HL } })
+
+  if #status_parts > 0 then
+    table.insert(virt_lines, { { table.concat(status_parts, "  •  "), THINKING_HL } })
+  end
+
+  local footer = "Enter=send  Shift+Enter=new line  q=close  Ctrl+e=model"
+  if config.get("ui.allow_image_attachments") ~= false then
+    footer = footer .. "  Ctrl+g=attach"
+  end
+  table.insert(virt_lines, { { footer, THINKING_HL } })
+
+  if #virt_lines > 0 then
+    local line_count = vim.api.nvim_buf_line_count(M.input_buf)
+    vim.api.nvim_buf_set_extmark(M.input_buf, INPUT_STATUS_NS, line_count - 1, 0, {
+      virt_lines = virt_lines,
+      virt_lines_above = false,
+    })
+  end
+end
+
 local function perform_render()
   if not M.result_buf or not vim.api.nvim_buf_is_valid(M.result_buf) then
     return
@@ -1470,17 +1589,24 @@ local function perform_render()
   end
 
   local function render_user_markdown(msg)
-    add_line("**User:**")
-    add_line("", nil)
+    local start_line = #lines
     for _, line in ipairs(split_text(msg.content)) do
-      add_line(line)
+      local pad = math.max(0, width - #line)
+      add_line(line .. string.rep(" ", pad))
     end
     if msg.images and #msg.images > 0 then
-      add_line("", nil)
-      add_line("**Attachments:**")
+      local att = "Attachments:"
+      local pad = math.max(0, width - #att)
+      add_line(att .. string.rep(" ", pad))
       for _, image in ipairs(msg.images) do
-        add_line(string.format("![](%s)", format_image_label(image)))
+        local label = string.format("[Image] %s", format_image_label(image))
+        local img_pad = math.max(0, width - #label)
+        add_line(label .. string.rep(" ", img_pad))
       end
+    end
+    local end_line = #lines - 1
+    for l = start_line, end_line do
+      table.insert(line_highlights, { line = l, group = USER_PROMPT_HL })
     end
     add_line("", nil)
   end
@@ -1584,26 +1710,6 @@ local function perform_render()
     end
   end
 
-  local status_parts = {}
-  if M.session_info.model then
-    local model_name = M.session_info.model:match("([^/]+)$") or M.session_info.model
-    table.insert(status_parts, "model: " .. model_name)
-  end
-  if M.session_info.tokens.input > 0 or M.session_info.tokens.output > 0 then
-    table.insert(status_parts, string.format("%.1fk/%.1fk", M.session_info.tokens.input / 1000, M.session_info.tokens.output / 1000))
-  end
-  if M.is_streaming then
-    table.insert(status_parts, "● working")
-  end
-  if #M.pending_images > 0 then
-    table.insert(status_parts, string.format("%d image(s) attached", #M.pending_images))
-  end
-
-  if #status_parts > 0 then
-    add_line("  " .. table.concat(status_parts, "  •  "))
-    add_line("  " .. string.rep("─", width - 2))
-  end
-
   for _, msg in ipairs(M.messages) do
     ensure_separator()
 
@@ -1649,23 +1755,18 @@ local function perform_render()
   end
 
   ensure_separator()
-  add_line("  " .. string.rep("─", width - 2))
-  local footer = "Enter=send  Shift+Enter=new line  q=close"
-  if config.get("ui.allow_image_attachments") ~= false then
-    footer = footer .. "  Ctrl+g=attach"
-  end
-  add_line("  " .. footer)
 
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(M.result_buf, 0, -1, false, lines)
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
 
-  if not use_render_markdown then
-    vim.api.nvim_buf_clear_namespace(M.result_buf, HIGHLIGHT_NS, 0, -1)
-    for _, hl in ipairs(line_highlights) do
-      vim.api.nvim_buf_add_highlight(M.result_buf, HIGHLIGHT_NS, hl.group, hl.line, 0, -1)
-    end
+  vim.api.nvim_buf_clear_namespace(M.result_buf, HIGHLIGHT_NS, 0, -1)
 
+  for _, hl in ipairs(line_highlights) do
+    vim.api.nvim_buf_add_highlight(M.result_buf, HIGHLIGHT_NS, hl.group, hl.line, 0, -1)
+  end
+
+  if not use_render_markdown then
     local function apply_range(entry)
       if not entry or entry.line == nil or not entry.group then
         return
@@ -1708,6 +1809,7 @@ local function do_render()
   end
   last_render_time = vim.loop.now()
   perform_render()
+  render_input_status()
 end
 
 function M.render()
@@ -1764,6 +1866,16 @@ function M.send_message(text, opts)
   agent.prompt(client, text, prompt_opts, function(result)
     vim.schedule(function()
       if result and result.error then
+        -- If the error is a timeout but the agent is still running (we're
+        -- receiving streaming events), don't kill the streaming state or
+        -- show an error — the agent is just busy processing.
+        local is_timeout = type(result.error) == "string" and result.error:match("^Timeout:")
+        local agent_still_running = state.get("agent.running")
+        if is_timeout and agent_still_running then
+          -- Silently ignore — agent acknowledged via events, not via
+          -- the request-response.  The prompt is being processed.
+          return
+        end
         M.is_streaming = false
         M.add_message("system", "Error: " .. result.error, false)
       end

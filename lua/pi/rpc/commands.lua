@@ -93,11 +93,26 @@ function M.format(cmd)
   return table.concat(parts)
 end
 
+--- Local-only commands that are handled client-side (not from the agent).
+local local_commands = {
+  { name = "/model", description = "Switch the active model", source = "local" },
+  { name = "/thinking", description = "Set thinking / reasoning level", source = "local" },
+}
+
 --- Get command completion items for telescope/fzf
 -- @return table Array of { name, description, source, location }
 function M.get_completion_items()
   local commands = M.get_cached()
   local items = {}
+  -- Include local (client-side) commands
+  for _, cmd in ipairs(local_commands) do
+    table.insert(items, {
+      name = cmd.name,
+      description = cmd.description,
+      source = cmd.source,
+    })
+  end
+  -- Include server-side commands
   for _, cmd in ipairs(commands) do
     table.insert(items, {
       name = "/" .. cmd.name,

@@ -9,6 +9,7 @@ function M.new()
     request_id = 0,
     pending = {},
     buffer = "",
+    last_stdout_time = 0, -- tracks when we last received any stdout data
   }
   setmetatable(self, { __index = M })
   return self
@@ -73,6 +74,7 @@ function M:connect(callback)
       if data then
         for _, chunk in ipairs(data) do
           if chunk and chunk ~= "" then
+            self.last_stdout_time = vim.loop.now()
             self:_handle_chunk(chunk)
           end
         end
@@ -81,9 +83,37 @@ function M:connect(callback)
     on_stderr = function(_, data, _)
       -- Stderr is ignored - Pi may log there
     end,
-    on_exit = function(_, _, _)
+    on_exit = function(_, exit_code, _)
+      local was_connected = self.connected
       self.job_id = nil
       self.connected = false
+      -- Reject all pending requests
+      for id, cb in pairs(self.pending) do
+        self.pending[id] = nil
+        vim.schedule(function()
+          cb({ error = "Process exited" })
+        end)
+      end
+      self.pending = {}
+      self.buffer = ""
+      -- Stop heartbeat
+      if self._heartbeat_timer then
+        vim.fn.timer_stop(self._heartbeat_timer)
+        self._heartbeat_timer = nil
+      end
+      vim.schedule(function()
+        local events = require("pi.events")
+        local pi_state = require("pi.state")
+        pi_state.update("connected", false)
+        pi_state.update("agent.running", false)
+        events.emit("rpc_event", { type = "disconnected", exit_code = exit_code })
+        if was_connected then
+          vim.notify(
+            string.format("Pi: Agent disconnected (exit code: %s)", tostring(exit_code)),
+            vim.log.levels.WARN
+          )
+        end
+      end)
     end,
     stdout_buffered = false,
   })
@@ -116,6 +146,7 @@ function M:_retry_connect(final_callback, start_time)
   self:request("get_state", { type = "get_state" }, function(result)
     if result and result.success then
       self.connected = true
+      self:_start_heartbeat()
       vim.schedule(function()
         final_callback(true)
       end)
@@ -127,7 +158,120 @@ function M:_retry_connect(final_callback, start_time)
   end)
 end
 
+function M:_start_heartbeat()
+  if self._heartbeat_timer then
+    vim.fn.timer_stop(self._heartbeat_timer)
+  end
+  local interval = config.get("heartbeat_interval") or 30000 -- 30 seconds
+  local consecutive_failures = 0
+  local max_failures = 3
+  -- If we've received stdout data within this window, the agent is alive —
+  -- don't count a heartbeat timeout as a failure.
+  local activity_window_ms = 60000
+  -- When the agent is actively running (processing a prompt), use a much
+  -- larger window before considering it unresponsive.  Long tool executions
+  -- and deep thinking can easily take several minutes without stdout.
+  local busy_activity_window_ms = 300000 -- 5 minutes
+
+  self._heartbeat_timer = vim.fn.timer_start(interval, function()
+    vim.schedule(function()
+      if not self.connected or not self.job_id then
+        if self._heartbeat_timer then
+          vim.fn.timer_stop(self._heartbeat_timer)
+          self._heartbeat_timer = nil
+        end
+        return
+      end
+
+      local pi_state = require("pi.state")
+      local agent_running = pi_state.get("agent.running")
+
+      -- Choose activity window based on whether agent is actively working
+      local window = agent_running and busy_activity_window_ms or activity_window_ms
+
+      -- If we've received any stdout data recently, the process is alive.
+      -- Reset failures and skip sending a heartbeat request that would
+      -- likely time out anyway (the agent is busy streaming).
+      local now = vim.loop.now()
+      if (now - self.last_stdout_time) < window then
+        consecutive_failures = 0
+        return
+      end
+
+      -- If the agent is running and the process is still alive, be very
+      -- conservative — only reconnect after many more failures to avoid
+      -- disrupting an active session.
+      local effective_max_failures = agent_running and (max_failures * 3) or max_failures
+
+      self:request("get_state", { type = "get_state" }, function(result)
+        vim.schedule(function()
+          -- Re-check activity: data may have arrived while we waited
+          if (vim.loop.now() - self.last_stdout_time) < window then
+            consecutive_failures = 0
+            return
+          end
+          if result and result.success then
+            consecutive_failures = 0
+          else
+            consecutive_failures = consecutive_failures + 1
+            if consecutive_failures >= effective_max_failures then
+              vim.notify(
+                string.format("Pi: Agent unresponsive after %d heartbeat failures, reconnecting...", consecutive_failures),
+                vim.log.levels.WARN
+              )
+              self:reconnect()
+            end
+          end
+        end)
+      end)
+    end)
+  end, { ["repeat"] = -1 })
+end
+
+function M:reconnect(callback)
+  callback = callback or function(success, err)
+    vim.schedule(function()
+      if success then
+        vim.notify("Pi: Reconnected", vim.log.levels.INFO)
+        local events = require("pi.events")
+        events.emit("rpc_event", { type = "reconnected" })
+      else
+        vim.notify("Pi: Reconnection failed - " .. tostring(err), vim.log.levels.ERROR)
+      end
+    end)
+  end
+
+  -- Stop heartbeat and reset state without killing the process
+  if self._heartbeat_timer then
+    vim.fn.timer_stop(self._heartbeat_timer)
+    self._heartbeat_timer = nil
+  end
+  self.connected = false
+  -- Reject pending requests
+  for id, cb in pairs(self.pending) do
+    self.pending[id] = nil
+    vim.schedule(function()
+      cb({ error = "Reconnecting" })
+    end)
+  end
+  self.pending = {}
+  -- Don't clear self.buffer here — the process is still running and may
+  -- have sent a partial message. Clearing it would corrupt the next parse.
+
+  -- If process is still alive, try to reconnect to it
+  if self.job_id then
+    self:_retry_connect(callback, vim.loop.now())
+  else
+    -- Process died, restart it
+    self:connect(callback)
+  end
+end
+
 function M:disconnect()
+  if self._heartbeat_timer then
+    vim.fn.timer_stop(self._heartbeat_timer)
+    self._heartbeat_timer = nil
+  end
   if self.job_id then
     pcall(vim.fn.jobstop, self.job_id)
     self.job_id = nil
@@ -143,7 +287,16 @@ function M:disconnect()
   self.buffer = ""
 end
 
-function M:request(method, params, callback)
+-- Methods that initiate long-running agent work; these should never
+-- be timed out while the process is alive because the agent may take
+-- a very long time to acknowledge them (it processes the prompt first).
+local LONG_RUNNING_METHODS = {
+  prompt = true,
+  steer = true,
+  follow_up = true,
+}
+
+function M:request(method, params, callback, opts)
   if not self.job_id then
     vim.schedule(function()
       callback({ error = "Not connected" })
@@ -167,15 +320,30 @@ function M:request(method, params, callback)
 
   self.pending[id] = callback
 
-  -- Set up 30-second timeout
-  vim.defer_fn(function()
-    if self.pending[id] then
-      self.pending[id] = nil
-      vim.schedule(function()
-        callback({ error = "Timeout: " .. method })
-      end)
-    end
-  end, 30000)
+  -- Determine timeout:
+  --   • Long-running methods (prompt, steer, follow_up) get 5 minutes.
+  --   • Callers can override via opts.timeout (in ms), or pass 0 to disable.
+  --   • Everything else defaults to 30 seconds.
+  opts = opts or {}
+  local timeout_ms
+  if opts.timeout ~= nil then
+    timeout_ms = opts.timeout
+  elseif LONG_RUNNING_METHODS[params.type or method] then
+    timeout_ms = 300000 -- 5 minutes
+  else
+    timeout_ms = 30000
+  end
+
+  if timeout_ms > 0 then
+    vim.defer_fn(function()
+      if self.pending[id] then
+        self.pending[id] = nil
+        vim.schedule(function()
+          callback({ error = "Timeout: " .. method })
+        end)
+      end
+    end, timeout_ms)
+  end
 
   local json = vim.json.encode(cmd) .. "\n"
   vim.fn.chansend(self.job_id, json)

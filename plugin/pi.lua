@@ -633,6 +633,14 @@ vim.api.nvim_create_user_command("PiModelList", function()
   end)
 end, { desc = "List available models" })
 
+vim.api.nvim_create_user_command("PiModelSelect", function()
+  require("pi.ui.model_selector").open()
+end, { desc = "Open model selection dropdown" })
+
+vim.api.nvim_create_user_command("PiThinkingSelect", function()
+  require("pi.ui.model_selector").open_thinking_level()
+end, { desc = "Open thinking level selector" })
+
 vim.api.nvim_create_user_command("PiThinking", function(opts)
   local client = require("pi.state").get("rpc_client")
   if not client then
