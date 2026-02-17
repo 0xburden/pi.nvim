@@ -509,4 +509,216 @@ function M.open(opts)
   end)
 end
 
+-- ── Thinking Level Picker ───────────────────────────────────────────
+
+local thinking_picker = {
+  buf = nil,
+  win = nil,
+  selected = 1,
+  levels = { "off", "minimal", "low", "medium", "high", "xhigh" },
+  current_level = nil,
+  augroup = nil,
+}
+
+local THINKING_NS = vim.api.nvim_create_namespace("pi_thinking_picker")
+
+local function thinking_is_open()
+  return thinking_picker.win ~= nil and vim.api.nvim_win_is_valid(thinking_picker.win)
+end
+
+local function close_thinking()
+  if thinking_picker.augroup then
+    pcall(vim.api.nvim_del_augroup_by_id, thinking_picker.augroup)
+    thinking_picker.augroup = nil
+  end
+
+  if thinking_picker.win and vim.api.nvim_win_is_valid(thinking_picker.win) then
+    vim.api.nvim_win_close(thinking_picker.win, true)
+  end
+
+  thinking_picker.buf = nil
+  thinking_picker.win = nil
+  thinking_picker.selected = 1
+  thinking_picker.current_level = nil
+
+  -- Return focus to chat input
+  local ok, chat = pcall(require, "pi.ui.chat")
+  if ok and chat.is_open() and chat.input_win and vim.api.nvim_win_is_valid(chat.input_win) then
+    vim.api.nvim_set_current_win(chat.input_win)
+    vim.cmd("startinsert!")
+  end
+end
+
+local function render_thinking_list()
+  if not thinking_picker.buf or not vim.api.nvim_buf_is_valid(thinking_picker.buf) then return end
+
+  local width = 30
+  if thinking_picker.win and vim.api.nvim_win_is_valid(thinking_picker.win) then
+    width = vim.api.nvim_win_get_width(thinking_picker.win)
+  end
+
+  local lines = {}
+  local highlights = {}
+
+  for i, level in ipairs(thinking_picker.levels) do
+    local indicator = (level == thinking_picker.current_level) and "● " or "  "
+    local text = indicator .. level
+    local pad = math.max(0, width - #text)
+    table.insert(lines, text .. string.rep(" ", pad))
+
+    local line_idx = i - 1
+    if i == thinking_picker.selected then
+      table.insert(highlights, { line = line_idx, group = "PiPickerSelected" })
+    elseif level == thinking_picker.current_level then
+      table.insert(highlights, { line = line_idx, group = "PiPickerCurrent" })
+    end
+  end
+
+  vim.api.nvim_buf_set_option(thinking_picker.buf, "modifiable", true)
+  vim.api.nvim_buf_set_lines(thinking_picker.buf, 0, -1, false, lines)
+  vim.api.nvim_buf_set_option(thinking_picker.buf, "modifiable", false)
+
+  vim.api.nvim_buf_clear_namespace(thinking_picker.buf, THINKING_NS, 0, -1)
+  for _, hl in ipairs(highlights) do
+    vim.api.nvim_buf_add_highlight(thinking_picker.buf, THINKING_NS, hl.group, hl.line, 0, -1)
+  end
+
+  if thinking_picker.win and vim.api.nvim_win_is_valid(thinking_picker.win) then
+    pcall(vim.api.nvim_win_set_cursor, thinking_picker.win, { thinking_picker.selected, 0 })
+  end
+end
+
+local function select_thinking_level()
+  local level = thinking_picker.levels[thinking_picker.selected]
+  if not level then return end
+
+  local client = state.get("rpc_client")
+  if not client or not client.connected then
+    vim.notify("Pi: Not connected to agent", vim.log.levels.ERROR)
+    close_thinking()
+    return
+  end
+
+  close_thinking()
+
+  model_rpc.set_thinking_level(client, level, function(result)
+    vim.schedule(function()
+      if result and result.success then
+        vim.notify("Pi: Thinking level set to " .. level, vim.log.levels.INFO)
+        local ok, chat = pcall(require, "pi.ui.chat")
+        if ok and chat and chat.is_open() then
+          chat.render()
+        end
+      else
+        vim.notify("Pi: Failed to set thinking level - " .. (result and result.error or "unknown"), vim.log.levels.ERROR)
+      end
+    end)
+  end)
+end
+
+local function move_thinking_selection(delta)
+  local count = #thinking_picker.levels
+  if count == 0 then return end
+  thinking_picker.selected = thinking_picker.selected + delta
+  if thinking_picker.selected < 1 then thinking_picker.selected = count end
+  if thinking_picker.selected > count then thinking_picker.selected = 1 end
+  render_thinking_list()
+end
+
+--- Open the thinking level picker as a floating dropdown
+---@param opts table|nil { anchor_win: number|nil }
+function M.open_thinking_level(opts)
+  if thinking_is_open() then close_thinking() return end
+  if M.is_open() then M.close() end
+  opts = opts or {}
+
+  setup_highlights()
+
+  if not model_rpc.supports_thinking() then
+    vim.notify("Pi: Current model does not support thinking levels", vim.log.levels.WARN)
+    return
+  end
+
+  thinking_picker.current_level = model_rpc.get_thinking_level() or "off"
+  thinking_picker.selected = 1
+  for i, level in ipairs(thinking_picker.levels) do
+    if level == thinking_picker.current_level then
+      thinking_picker.selected = i
+      break
+    end
+  end
+
+  -- Calculate position
+  local list_height = #thinking_picker.levels
+  local width = 30
+  local row, col
+
+  local anchor = opts.anchor_win
+  if anchor and vim.api.nvim_win_is_valid(anchor) then
+    local win_pos = vim.api.nvim_win_get_position(anchor)
+    local win_width = vim.api.nvim_win_get_width(anchor)
+    col = win_pos[2]
+    width = math.min(width, win_width)
+    local total = list_height + 2 -- borders
+    row = win_pos[1] - total
+    if row < 0 then
+      row = win_pos[1] + vim.api.nvim_win_get_height(anchor) + 1
+    end
+  else
+    row = math.max(0, math.floor((vim.o.lines - list_height - 2) / 2))
+    col = math.max(0, math.floor((vim.o.columns - width) / 2))
+  end
+
+  thinking_picker.buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_option(thinking_picker.buf, "buftype", "nofile")
+  vim.api.nvim_buf_set_option(thinking_picker.buf, "bufhidden", "wipe")
+  vim.api.nvim_buf_set_option(thinking_picker.buf, "swapfile", false)
+  vim.api.nvim_buf_set_option(thinking_picker.buf, "modifiable", false)
+
+  thinking_picker.win = vim.api.nvim_open_win(thinking_picker.buf, true, {
+    relative = "editor",
+    row = math.max(0, row),
+    col = math.max(0, col),
+    width = width,
+    height = list_height,
+    style = "minimal",
+    border = "rounded",
+    title = " Thinking Level ",
+    title_pos = "center",
+    focusable = true,
+    zindex = 250,
+  })
+  vim.api.nvim_win_set_option(thinking_picker.win, "cursorline", false)
+  vim.api.nvim_win_set_option(thinking_picker.win, "wrap", false)
+  vim.api.nvim_win_set_option(thinking_picker.win, "winhighlight", "Normal:PiPickerNormal,FloatBorder:PiPickerBorder")
+
+  render_thinking_list()
+
+  -- Keymaps
+  local buf = thinking_picker.buf
+  local map_opts = { buffer = buf, silent = true, nowait = true }
+
+  vim.keymap.set("n", "j", function() move_thinking_selection(1) end, map_opts)
+  vim.keymap.set("n", "k", function() move_thinking_selection(-1) end, map_opts)
+  vim.keymap.set("n", "<Down>", function() move_thinking_selection(1) end, map_opts)
+  vim.keymap.set("n", "<Up>", function() move_thinking_selection(-1) end, map_opts)
+  vim.keymap.set("n", "<CR>", select_thinking_level, map_opts)
+  vim.keymap.set("n", "<Esc>", close_thinking, map_opts)
+  vim.keymap.set("n", "q", close_thinking, map_opts)
+
+  -- Autocmds
+  thinking_picker.augroup = vim.api.nvim_create_augroup("PiThinkingPicker", { clear = true })
+  vim.api.nvim_create_autocmd("BufLeave", {
+    group = thinking_picker.augroup,
+    buffer = thinking_picker.buf,
+    callback = function()
+      vim.defer_fn(function()
+        if thinking_is_open() then
+          close_thinking()
+        end
+      end, 50)
+    end,
+  })
+end
+
 return M

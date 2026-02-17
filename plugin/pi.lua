@@ -634,11 +634,15 @@ vim.api.nvim_create_user_command("PiModelList", function()
 end, { desc = "List available models" })
 
 vim.api.nvim_create_user_command("PiModelSelect", function()
-  require("pi.ui.model_selector").open()
+  local chat = require("pi.ui.chat")
+  local anchor = chat.is_open() and chat.input_win or nil
+  require("pi.ui.model_picker").open({ anchor_win = anchor })
 end, { desc = "Open model selection dropdown" })
 
 vim.api.nvim_create_user_command("PiThinkingSelect", function()
-  require("pi.ui.model_selector").open_thinking_level()
+  local chat = require("pi.ui.chat")
+  local anchor = chat.is_open() and chat.input_win or nil
+  require("pi.ui.model_picker").open_thinking_level({ anchor_win = anchor })
 end, { desc = "Open thinking level selector" })
 
 vim.api.nvim_create_user_command("PiThinking", function(opts)

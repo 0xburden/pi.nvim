@@ -25,7 +25,7 @@ if syntax_enabled then
 end
 
 local HIGHLIGHT_NS = vim.api.nvim_create_namespace("pi_chat_highlights")
-local INPUT_STATUS_NS = vim.api.nvim_create_namespace("pi_chat_input_status")
+local STATUS_NS = vim.api.nvim_create_namespace("pi_chat_status")
 local HIGHLIGHT_AUGROUP = vim.api.nvim_create_augroup("PiChatHighlights", { clear = true })
 local THINKING_HL = "PiChatThinking"
 local USER_PROMPT_HL = "PiChatUserPrompt"
@@ -92,6 +92,16 @@ local function setup_highlights()
     [DIFF_DEL_HL] = {
       link = "DiffDelete",
     },
+    ["PiChatContextOk"] = {
+      fg_link = "Comment",
+      italic = true,
+    },
+    ["PiChatContextWarn"] = {
+      fg_link = "WarningMsg",
+    },
+    ["PiChatContextError"] = {
+      fg_link = "ErrorMsg",
+    },
   }
 
   for name, def in pairs(custom_highlights) do
@@ -130,6 +140,8 @@ M.result_buf = nil
 M.result_win = nil
 M.input_buf = nil
 M.input_win = nil
+M.status_buf = nil
+M.status_win = nil
 M.origin_win = nil
 
 -- Event subscription
@@ -142,10 +154,33 @@ M.is_streaming = false
 M.messages = {}
 M.agent_cwd = vim.fn.getcwd()
 
+-- Activity tracking
+M.streaming_start_time = nil
+M.agent_phase = "idle"  -- "idle", "thinking", "generating", "tool"
+M.last_event_time = nil  -- Last time we received any agent event
+M._sync_timer = nil       -- Periodic state sync timer
+
 -- Session info
 M.session_info = {
   model = nil,
+  model_data = nil, -- Full model object from get_state (has contextWindow, reasoning, etc.)
   tokens = { input = 0, output = 0 },
+  -- Cumulative usage across all assistant messages in session
+  cumulative = {
+    input = 0,
+    output = 0,
+    cache_read = 0,
+    cache_write = 0,
+    cost = 0,
+  },
+  -- Context window usage
+  context = {
+    tokens = nil,      -- Current context tokens used (nil = unknown, e.g. after compaction)
+    window = 0,        -- Context window size from model
+    percent = nil,     -- Usage percentage (nil = unknown)
+  },
+  thinking_level = nil,
+  auto_compaction = true,
 }
 
 -- Pending file paths to open after edits
@@ -162,6 +197,71 @@ M.parameter_hint_active = false
 -- Constants
 M.RESULT_BUF_NAME = "PiChat"
 M.INPUT_BUF_NAME = "PiChatInput"
+M.STATUS_BUF_NAME = "PiChatStatus"
+
+--- Format token count for display (matches Pi TUI format)
+local function format_tokens(count)
+  if count < 1000 then
+    return tostring(count)
+  elseif count < 10000 then
+    return string.format("%.1fk", count / 1000)
+  elseif count < 1000000 then
+    return string.format("%dk", math.floor(count / 1000))
+  elseif count < 10000000 then
+    return string.format("%.1fM", count / 1000000)
+  else
+    return string.format("%dM", math.floor(count / 1000000))
+  end
+end
+
+--- Calculate context tokens from assistant message usage
+--- Mirrors Pi's calculateContextTokens: totalTokens || (input + output + cacheRead + cacheWrite)
+local function calculate_context_tokens(usage)
+  if not usage then
+    return 0
+  end
+  if usage.totalTokens and usage.totalTokens > 0 then
+    return usage.totalTokens
+  end
+  local input = usage.input or 0
+  local output = usage.output or 0
+  local cache_read = usage.cacheRead or 0
+  local cache_write = usage.cacheWrite or 0
+  return input + output + cache_read + cache_write
+end
+
+--- Update context usage from the latest assistant message's usage
+local function update_context_from_usage(usage)
+  if not usage then
+    return
+  end
+  local context_tokens = calculate_context_tokens(usage)
+  if context_tokens <= 0 then
+    return
+  end
+  M.session_info.context.tokens = context_tokens
+  local window = M.session_info.context.window
+  if window > 0 then
+    M.session_info.context.percent = (context_tokens / window) * 100
+  else
+    M.session_info.context.percent = nil
+  end
+end
+
+--- Accumulate usage stats from an assistant message
+local function accumulate_usage(usage)
+  if not usage then
+    return
+  end
+  local cum = M.session_info.cumulative
+  cum.input = cum.input + (usage.input or 0)
+  cum.output = cum.output + (usage.output or 0)
+  cum.cache_read = cum.cache_read + (usage.cacheRead or 0)
+  cum.cache_write = cum.cache_write + (usage.cacheWrite or 0)
+  if usage.cost then
+    cum.cost = cum.cost + (usage.cost.total or 0)
+  end
+end
 
 local function normalize_path(path, base)
   if not path or path == "" then
@@ -442,12 +542,12 @@ local function stop_spinner_animation()
 end
 
 local function start_spinner_animation()
-  if spinner_timer or not M.tool_spinner_active then
+  if spinner_timer then
     return
   end
   spinner_timer = vim.fn.timer_start(spinner_interval, function()
     vim.schedule(function()
-      if not M.tool_spinner_active then
+      if not M.is_streaming and not M.tool_spinner_active then
         stop_spinner_animation()
         return
       end
@@ -470,7 +570,102 @@ end
 local function stop_tool_spinner()
   M.tool_spinner_active = false
   M.tool_spinner_label = nil
-  stop_spinner_animation()
+  -- Don't stop the animation if we're still streaming — the thinking
+  -- spinner in the chat area and animated status bar still need it.
+  if not M.is_streaming then
+    stop_spinner_animation()
+  end
+end
+
+local SYNC_INTERVAL = 30000  -- 30 seconds
+
+local function stop_sync_timer()
+  if M._sync_timer then
+    vim.fn.timer_stop(M._sync_timer)
+    M._sync_timer = nil
+  end
+end
+
+local function start_sync_timer()
+  if M._sync_timer then
+    return
+  end
+  M._sync_timer = vim.fn.timer_start(SYNC_INTERVAL, function()
+    vim.schedule(function()
+      if not M.is_open() then
+        stop_sync_timer()
+        return
+      end
+      M.sync_agent_state()
+    end)
+  end, { ["repeat"] = -1 })
+end
+
+--- Synchronise the chat UI's streaming state with the actual agent state.
+--- This catches events that were missed (e.g. chat was closed/reopened,
+--- buffer overflow dropped a message, reconnection race, etc.).
+function M.sync_agent_state(callback)
+  local client = state.get("rpc_client")
+  if not client or not client.connected then
+    if callback then callback() end
+    return
+  end
+
+  -- If we've received an event very recently, the stream is healthy —
+  -- skip the RPC round-trip to avoid unnecessary load.
+  if M.last_event_time and (vim.loop.now() - M.last_event_time) < 10000 then
+    if callback then callback() end
+    return
+  end
+
+  client:request("get_state", { type = "get_state" }, function(result)
+    vim.schedule(function()
+      if not result or not result.success or not result.data then
+        if callback then callback() end
+        return
+      end
+
+      local data = result.data
+      local agent_running = data.isStreaming or false
+
+      -- Reconcile: agent is running but we lost track
+      if agent_running and not M.is_streaming then
+        M.is_streaming = true
+        M.streaming_start_time = M.streaming_start_time or vim.loop.now()
+        M.agent_phase = "thinking"
+        start_spinner_animation()
+        -- Reload conversation so we have the latest messages
+        M.load_history()
+      -- Reconcile: agent finished but we missed the event
+      elseif not agent_running and M.is_streaming then
+        M.is_streaming = false
+        M.streaming_start_time = nil
+        M.agent_phase = "idle"
+        M.finalize_streaming_message()
+        M.current_response = ""
+        M.current_thinking = ""
+        M.tool_streams = {}
+        stop_tool_spinner()
+        -- Reload to get the final messages
+        M.load_history()
+      end
+
+      -- Keep model/session info fresh
+      if data.model then
+        M.session_info.model = data.model.name or data.model.id or "Unknown"
+        M.session_info.model_data = data.model
+        M.session_info.context.window = data.model.contextWindow or 0
+        if M.session_info.context.tokens and M.session_info.context.window > 0 then
+          M.session_info.context.percent = (M.session_info.context.tokens / M.session_info.context.window) * 100
+        end
+      end
+      M.session_info.thinking_level = data.thinkingLevel
+      M.session_info.auto_compaction = data.autoCompactionEnabled ~= false
+
+      M.render()
+      if callback then callback() end
+    end)
+  end)
 end
 
 local try_open_file
@@ -493,7 +688,7 @@ local function flush_pending_file_paths()
 end
 
 local function is_valid_target_window(win)
-  return win and vim.api.nvim_win_is_valid(win) and win ~= M.result_win and win ~= M.input_win
+  return win and vim.api.nvim_win_is_valid(win) and win ~= M.result_win and win ~= M.input_win and win ~= M.status_win
 end
 
 local function choose_target_window()
@@ -603,6 +798,11 @@ function M._open_ui()
   vim.api.nvim_buf_set_option(M.result_buf, "linebreak", true)
 
   M.input_buf = get_or_create_buf(M.INPUT_BUF_NAME, true)
+  vim.api.nvim_buf_set_option(M.input_buf, "filetype", "PiChatInput")
+
+  M.status_buf = get_or_create_buf(M.STATUS_BUF_NAME, true)
+  vim.api.nvim_buf_set_option(M.status_buf, "filetype", "PiChatStatus")
+  vim.api.nvim_buf_set_option(M.status_buf, "modifiable", false)
 
   local total_width = vim.o.columns
   local chat_width = math.max(50, math.floor(total_width * 0.4))
@@ -629,7 +829,22 @@ function M._open_ui()
   vim.api.nvim_win_set_option(M.input_win, "signcolumn", "no")
   vim.api.nvim_win_set_option(M.input_win, "foldcolumn", "0")
   vim.api.nvim_win_set_option(M.input_win, "colorcolumn", "")
-  vim.api.nvim_win_set_option(M.input_win, "winhighlight", "WinSeparator:Normal")
+  vim.api.nvim_win_set_option(M.input_win, "winfixheight", true)
+
+  -- Create status split below input
+  vim.cmd("belowright 4split")
+  M.status_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(M.status_win, M.status_buf)
+  vim.api.nvim_win_set_option(M.status_win, "wrap", true)
+  vim.api.nvim_win_set_option(M.status_win, "cursorline", false)
+  vim.api.nvim_win_set_option(M.status_win, "number", false)
+  vim.api.nvim_win_set_option(M.status_win, "relativenumber", false)
+  vim.api.nvim_win_set_option(M.status_win, "signcolumn", "no")
+  vim.api.nvim_win_set_option(M.status_win, "foldcolumn", "0")
+  vim.api.nvim_win_set_option(M.status_win, "colorcolumn", "")
+  vim.api.nvim_win_set_option(M.status_win, "winfixheight", true)
+
+  vim.keymap.set("n", "q", "<cmd>PiChat<CR>", { buffer = M.status_buf, silent = true })
 
   M.setup_input_buffer()
   M.subscribe_to_events()
@@ -640,6 +855,11 @@ function M._open_ui()
   M.origin_win = origin_win
   state.update("ui.chat_open", true)
   render_input_status()
+
+  -- Restart spinner animation if agent is still streaming
+  if M.is_streaming then
+    start_spinner_animation()
+  end
 end
 
 function M._show_connecting_state()
@@ -686,6 +906,17 @@ function M._show_connection_error(err)
 end
 
 function M.setup_input_buffer()
+  -- Suppress built-in and plugin path/file completion in the input buffer.
+  -- "complete" controls what Ctrl-N/Ctrl-P scan; empty string disables all.
+  -- "omnifunc"/"completefunc" empty prevents :h i_CTRL-X style completions.
+  vim.api.nvim_buf_set_option(M.input_buf, "complete", "")
+  vim.api.nvim_buf_set_option(M.input_buf, "omnifunc", "")
+  vim.api.nvim_buf_set_option(M.input_buf, "completefunc", "")
+  -- Buffer-local variable respected by nvim-cmp, coq, and similar plugins
+  -- to skip attaching completion sources to this buffer.
+  vim.b[M.input_buf].cmp_enabled = false
+  vim.b[M.input_buf].copilot_enabled = false
+
   local autocomplete_enabled = config.get("ui.autocomplete_enabled") ~= false
   local function handle_enter()
     if autocomplete_enabled and autocomplete.is_open() then
@@ -703,10 +934,10 @@ function M.setup_input_buffer()
 
   -- Model selection keybindings (input buffer only to avoid overriding scroll keys)
   vim.keymap.set({ "n", "i" }, "<C-e>", function()
-    require("pi.ui.model_selector").open()
+    require("pi.ui.model_picker").open({ anchor_win = M.input_win })
   end, { buffer = M.input_buf, silent = true, desc = "Select model" })
   vim.keymap.set({ "n", "i" }, "<C-t>", function()
-    require("pi.ui.model_selector").open_thinking_level()
+    require("pi.ui.model_picker").open_thinking_level({ anchor_win = M.input_win })
   end, { buffer = M.input_buf, silent = true, desc = "Select thinking level" })
 
   if config.get("ui.allow_image_attachments") ~= false then
@@ -826,7 +1057,7 @@ local function handle_local_slash_command(text)
         vim.notify("Pi: Not connected to agent", vim.log.levels.ERROR)
       end
     else
-      require("pi.ui.model_selector").open_thinking_level()
+      require("pi.ui.model_picker").open_thinking_level({ anchor_win = M.input_win })
     end
     return true
   end
@@ -1086,25 +1317,82 @@ function M.subscribe_to_events()
     M.event_unsub()
   end
 
-  M.event_unsub = events.on("rpc_event", function(event)
+  local unsub_rpc = events.on("rpc_event", function(event)
     if not event then return end
     vim.schedule(function() M.handle_event(event) end)
   end)
+
+  local unsub_model = events.on("model_changed", function(model)
+    if not model then return end
+    vim.schedule(function()
+      M.session_info.model = model.name or model.id or "Unknown"
+      M.session_info.model_data = model
+      M.session_info.context.window = model.contextWindow or 0
+      -- Recalculate percent with new window size
+      if M.session_info.context.tokens and M.session_info.context.window > 0 then
+        M.session_info.context.percent = (M.session_info.context.tokens / M.session_info.context.window) * 100
+      end
+      render_input_status()
+    end)
+  end)
+
+  local unsub_thinking = events.on("thinking_level_changed", function(data)
+    if not data then return end
+    vim.schedule(function()
+      M.session_info.thinking_level = data.level
+      render_input_status()
+    end)
+  end)
+
+  local unsub_session = events.on("session_changed", function()
+    vim.schedule(function()
+      -- Reset cumulative stats for new session
+      M.session_info.cumulative = { input = 0, output = 0, cache_read = 0, cache_write = 0, cost = 0 }
+      M.session_info.context = { tokens = nil, window = M.session_info.context.window, percent = nil }
+      M.load_history()
+    end)
+  end)
+
+  local unsub_compaction = events.on("auto_compaction_changed", function(data)
+    if not data then return end
+    vim.schedule(function()
+      M.session_info.auto_compaction = data.enabled
+      render_input_status()
+    end)
+  end)
+
+  M.event_unsub = function()
+    unsub_rpc()
+    unsub_model()
+    unsub_thinking()
+    unsub_session()
+    unsub_compaction()
+    stop_sync_timer()
+  end
+
+  -- Start periodic state sync to catch missed events
+  start_sync_timer()
 end
 
 -- Handle ALL event types from Pi
 function M.handle_event(event)
   local event_type = event.type
+  M.last_event_time = vim.loop.now()
 
   if event_type == "agent_start" then
     M.is_streaming = true
     M.current_response = ""
     M.current_thinking = ""
+    M.streaming_start_time = M.streaming_start_time or vim.loop.now()
+    M.agent_phase = "thinking"
     M.add_message("assistant", "", true)
     stop_tool_spinner()
+    start_spinner_animation()
 
   elseif event_type == "agent_end" then
     M.is_streaming = false
+    M.streaming_start_time = nil
+    M.agent_phase = "idle"
     M.finalize_streaming_message()
     M.current_response = ""
     M.current_thinking = ""
@@ -1113,15 +1401,43 @@ function M.handle_event(event)
     M.tool_streams = {}
     stop_tool_spinner()
 
+    -- Extract usage from assistant messages in the agent_end payload
+    if event.messages then
+      for _, msg in ipairs(event.messages) do
+        if msg.role == "assistant" and msg.usage then
+          accumulate_usage(msg.usage)
+          -- The last assistant's usage reflects current context size
+          if msg.stopReason ~= "aborted" and msg.stopReason ~= "error" then
+            update_context_from_usage(msg.usage)
+          end
+        end
+      end
+    end
+
   elseif event_type == "disconnected" then
     M.is_streaming = false
+    M.streaming_start_time = nil
+    M.agent_phase = "idle"
     M.finalize_streaming_message()
     stop_tool_spinner()
     M.add_message("system", "Agent disconnected (exit code: " .. tostring(event.exit_code or "?") .. ")", false)
 
   elseif event_type == "reconnected" then
     M.add_message("system", "Agent reconnected", false)
-    M.load_history()
+    -- Force a full state sync (bypass the recent-event skip).
+    -- sync_agent_state already calls load_history when it detects a
+    -- state mismatch.  If there is no mismatch we still need to reload
+    -- messages, so we do it in the callback.
+    M.last_event_time = nil
+    local orig_is_streaming = M.is_streaming
+    M.sync_agent_state(function()
+      -- sync_agent_state changed streaming state → it already called
+      -- load_history, so we don't need to again.
+      if M.is_streaming ~= orig_is_streaming then
+        return
+      end
+      M.load_history()
+    end)
 
   elseif event_type == "turn_start" then
     -- silently ignored in chat UI
@@ -1133,6 +1449,7 @@ function M.handle_event(event)
     local tool_id = event.toolCallId
     local tool_name = event.toolName or event.tool or "tool"
     local args = event.args or {}
+    M.agent_phase = "tool"
     register_tool_call_context({ id = tool_id, name = tool_name, args = args })
     if config.get("ui.show_tool_streaming") ~= false then
       ensure_tool_stream(tool_id, tool_name, args)
@@ -1151,6 +1468,7 @@ function M.handle_event(event)
     local result_text = format_tool_result_text(event.result, event)
     update_tool_stream_output(tool_id, tool_name, args, result_text, true, { is_error = event.isError })
     handle_tool_result_metadata(tool_name, event.result, args)
+    M.agent_phase = "thinking"
     stop_tool_spinner()
     flush_pending_file_paths()
 
@@ -1164,6 +1482,12 @@ function M.handle_event(event)
     end
 
   elseif event_type == "auto_compaction_end" then
+    -- After compaction, context usage is unknown until next LLM response
+    if not event.aborted then
+      M.session_info.context.tokens = nil
+      M.session_info.context.percent = nil
+    end
+
     if config.get("ui.show_compaction_status") ~= false then
       local message_text = "Auto-compaction finished"
       if event.aborted then
@@ -1218,9 +1542,11 @@ function M.handle_event(event)
     local delta_type = delta.type
     
     if delta_type == "text_delta" and delta.delta then
+      M.agent_phase = "generating"
       M.append_to_stream(delta.delta)
       
     elseif delta_type == "thinking_delta" and delta.delta then
+      M.agent_phase = "thinking"
       M.append_to_thinking(delta.delta)
       
     elseif delta_type == "tool_call" or delta_type == "tool_use" or delta_type == "toolcall_start" then
@@ -1247,6 +1573,13 @@ function M.handle_event(event)
       M.session_info.tokens.output = event.usage.completion_tokens or M.session_info.tokens.output
     end
 
+    -- Also track usage from the streaming message for real-time context display
+    if event.message and event.message.usage then
+      local msg_usage = event.message.usage
+      -- Update context tokens in real-time as the message streams
+      update_context_from_usage(msg_usage)
+    end
+
   elseif event_type == "tool_result" then
     -- Tool execution completed - may contain diff/output
     local result = event.result or event.output or event.content
@@ -1260,6 +1593,16 @@ function M.handle_event(event)
   end
 
   if event.type == "message_end" and event.message then
+    -- Track usage from completed assistant messages for context display
+    if event.message.role == "assistant" and event.message.usage then
+      local usage = event.message.usage
+      -- Update context tokens from this assistant's perspective
+      if event.message.stopReason ~= "aborted" and event.message.stopReason ~= "error" then
+        update_context_from_usage(usage)
+      end
+      -- Note: cumulative stats are updated in agent_end to avoid double-counting
+    end
+
     if event.message.role == "toolResult" then
       local tool_id = event.message.toolCallId
       local context_command
@@ -1417,59 +1760,177 @@ function M.finalize_streaming_message()
 end
 
 render_input_status = function()
-  if not M.input_buf or not vim.api.nvim_buf_is_valid(M.input_buf) then
+  if not M.status_buf or not vim.api.nvim_buf_is_valid(M.status_buf) then
     return
   end
 
-  vim.api.nvim_buf_clear_namespace(M.input_buf, INPUT_STATUS_NS, 0, -1)
+  local lines = {}
+  local highlights = {} -- { line, col_start, col_end, group }
 
-  local virt_lines = {}
+  local status_width = 40
+  if M.status_win and vim.api.nvim_win_is_valid(M.status_win) then
+    status_width = vim.api.nvim_win_get_width(M.status_win)
+  end
 
-  local status_parts = {}
-  if M.session_info.model then
+  --- Append a line built from highlighted chunks: { { text, hl_group }, ... }
+  local function add_chunked_line(chunks)
+    local text = ""
+    local line_idx = #lines
+    for _, chunk in ipairs(chunks) do
+      local chunk_text = chunk[1] or ""
+      local chunk_hl = chunk[2]
+      if chunk_hl and #chunk_text > 0 then
+        table.insert(highlights, { line = line_idx, col_start = #text, col_end = #text + #chunk_text, group = chunk_hl })
+      end
+      text = text .. chunk_text
+    end
+    table.insert(lines, text)
+  end
+
+  -- Build token stats line (like Pi TUI: ↑input ↓output RcacheRead WcacheWrite $cost  context%/window)
+  local cum = M.session_info.cumulative
+
+  -- Cumulative token stats
+  local stats_parts = {}
+  if cum.input > 0 then
+    table.insert(stats_parts, "↑" .. format_tokens(cum.input))
+  end
+  if cum.output > 0 then
+    table.insert(stats_parts, "↓" .. format_tokens(cum.output))
+  end
+  if cum.cache_read > 0 then
+    table.insert(stats_parts, "R" .. format_tokens(cum.cache_read))
+  end
+  if cum.cache_write > 0 then
+    table.insert(stats_parts, "W" .. format_tokens(cum.cache_write))
+  end
+  if cum.cost > 0 then
+    table.insert(stats_parts, string.format("$%.3f", cum.cost))
+  end
+
+  -- Context usage display with color-coding
+  local ctx = M.session_info.context
+  local auto_indicator = M.session_info.auto_compaction and " (auto)" or ""
+
+  local context_text
+  local context_hl = "PiChatContextOk"
+  if ctx.percent ~= nil then
+    context_text = string.format("%.1f%%/%s%s", ctx.percent, format_tokens(ctx.window), auto_indicator)
+    if ctx.percent > 90 then
+      context_hl = "PiChatContextError"
+    elseif ctx.percent > 70 then
+      context_hl = "PiChatContextWarn"
+    end
+  elseif ctx.window > 0 then
+    context_text = string.format("?/%s%s", format_tokens(ctx.window), auto_indicator)
+  end
+
+  if #stats_parts > 0 or context_text then
+    local left_text = table.concat(stats_parts, " ")
+
+    -- Build model + thinking info for the right side
+    local right_text = ""
+    if M.session_info.model then
+      local model_name = M.session_info.model:match("([^/]+)$") or M.session_info.model
+      right_text = model_name
+      local model_data = M.session_info.model_data
+      if model_data and model_data.reasoning then
+        local thinking = M.session_info.thinking_level or "off"
+        if thinking == "off" then
+          right_text = right_text .. " • thinking off"
+        else
+          right_text = right_text .. " • " .. thinking
+        end
+      end
+    end
+
+    if context_text then
+      if #stats_parts > 0 then
+        left_text = left_text .. " "
+      end
+    end
+
+    -- Calculate padding for right-aligned model info
+    local left_len = #left_text + (context_text and #context_text or 0)
+    local right_len = #right_text
+    local total_needed = left_len + 2 + right_len -- 2 = minimum padding
+
+    local chunks = {}
+    if #left_text > 0 then
+      table.insert(chunks, { left_text, THINKING_HL })
+    end
+    if context_text then
+      table.insert(chunks, { context_text, context_hl })
+    end
+    if right_text ~= "" and total_needed <= status_width then
+      local padding = string.rep(" ", math.max(2, status_width - left_len - right_len))
+      table.insert(chunks, { padding .. right_text, THINKING_HL })
+    elseif right_text ~= "" then
+      -- Not enough room — put model on its own line
+      add_chunked_line(chunks)
+      chunks = { { right_text, THINKING_HL } }
+    end
+    add_chunked_line(chunks)
+  elseif M.session_info.model then
+    -- No stats yet, just show model name
     local model_name = M.session_info.model:match("([^/]+)$") or M.session_info.model
-    table.insert(status_parts, "model: " .. model_name)
+    local model_text = model_name
+    local model_data = M.session_info.model_data
+    if model_data and model_data.reasoning then
+      local thinking = M.session_info.thinking_level or "off"
+      if thinking == "off" then
+        model_text = model_text .. " • thinking off"
+      else
+        model_text = model_text .. " • " .. thinking
+      end
+    end
+    add_chunked_line({ { model_text, THINKING_HL } })
   end
-  if M.session_info.tokens.input > 0 or M.session_info.tokens.output > 0 then
-    table.insert(status_parts, string.format("%.1fk/%.1fk", M.session_info.tokens.input / 1000, M.session_info.tokens.output / 1000))
-  end
+
+  -- Status indicators line (streaming, images)
+  local indicator_parts = {}
   if M.is_streaming then
-    table.insert(status_parts, "● working")
+    local frame = M.spinner_frames[M.spinner_index] or M.spinner_frames[1]
+    local phase_text = M.agent_phase == "generating" and "generating"
+      or M.agent_phase == "tool" and "running tool"
+      or "thinking"
+    local elapsed_text = ""
+    if M.streaming_start_time then
+      local secs = math.floor((vim.loop.now() - M.streaming_start_time) / 1000)
+      if secs >= 1 then
+        elapsed_text = string.format(" %ds", secs)
+      end
+    end
+    table.insert(indicator_parts, string.format("%s %s%s", frame, phase_text, elapsed_text))
   end
   if #M.pending_images > 0 then
-    table.insert(status_parts, string.format("%d image(s) attached", #M.pending_images))
+    table.insert(indicator_parts, string.format("%d image(s) attached", #M.pending_images))
   end
-  local sep_width = 40
-  if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
-    sep_width = vim.api.nvim_win_get_width(M.input_win)
-  end
-  local sep_line = string.rep("─", sep_width)
-
-  -- Top separator (above input line)
-  vim.api.nvim_buf_set_extmark(M.input_buf, INPUT_STATUS_NS, 0, 0, {
-    virt_lines = { { { sep_line, THINKING_HL } } },
-    virt_lines_above = true,
-  })
-
-  -- Bottom separator (below input line)
-  table.insert(virt_lines, { { sep_line, THINKING_HL } })
-
-  if #status_parts > 0 then
-    table.insert(virt_lines, { { table.concat(status_parts, "  •  "), THINKING_HL } })
+  if #indicator_parts > 0 then
+    add_chunked_line({ { table.concat(indicator_parts, "  •  "), THINKING_HL } })
   end
 
   local footer = "Enter=send  Shift+Enter=new line  q=close  Ctrl+e=model"
   if config.get("ui.allow_image_attachments") ~= false then
     footer = footer .. "  Ctrl+g=attach"
   end
-  table.insert(virt_lines, { { footer, THINKING_HL } })
+  add_chunked_line({ { footer, THINKING_HL } })
 
-  if #virt_lines > 0 then
-    local line_count = vim.api.nvim_buf_line_count(M.input_buf)
-    vim.api.nvim_buf_set_extmark(M.input_buf, INPUT_STATUS_NS, line_count - 1, 0, {
-      virt_lines = virt_lines,
-      virt_lines_above = false,
-    })
+  -- Write lines to the status buffer
+  vim.api.nvim_buf_set_option(M.status_buf, "modifiable", true)
+  vim.api.nvim_buf_set_lines(M.status_buf, 0, -1, false, lines)
+  vim.api.nvim_buf_set_option(M.status_buf, "modifiable", false)
+
+  -- Apply highlights
+  vim.api.nvim_buf_clear_namespace(M.status_buf, STATUS_NS, 0, -1)
+  for _, hl in ipairs(highlights) do
+    vim.api.nvim_buf_add_highlight(M.status_buf, STATUS_NS, hl.group, hl.line, hl.col_start, hl.col_end)
+  end
+
+  -- Resize status window to fit content
+  if M.status_win and vim.api.nvim_win_is_valid(M.status_win) then
+    local target_height = math.max(1, #lines)
+    vim.api.nvim_win_set_height(M.status_win, target_height)
   end
 end
 
@@ -1488,7 +1949,21 @@ local function perform_render()
   end
 
   local function add_line(text, hl)
-    table.insert(lines, text or "")
+    text = text or ""
+    -- nvim_buf_set_lines rejects strings containing newlines;
+    -- split them so every entry in `lines` is a single line.
+    if text:find("\n", 1, true) then
+      local sub_lines = vim.split(text, "\n", { plain = true })
+      local first_idx = #lines
+      for _, sub in ipairs(sub_lines) do
+        table.insert(lines, sub)
+        if hl and not use_render_markdown then
+          table.insert(line_highlights, { line = #lines - 1, group = hl })
+        end
+      end
+      return first_idx
+    end
+    table.insert(lines, text)
     local idx = #lines - 1
     if hl and not use_render_markdown then
       table.insert(line_highlights, { line = idx, group = hl })
@@ -1752,6 +2227,23 @@ local function perform_render()
     local frame = M.spinner_frames[M.spinner_index] or M.spinner_frames[1]
     local label = M.tool_spinner_label or "tool"
     add_line(string.format("  %s Running %s...", frame, label))
+  elseif M.is_streaming then
+    ensure_separator()
+    local frame = M.spinner_frames[M.spinner_index] or M.spinner_frames[1]
+    local phase_label
+    if M.agent_phase == "generating" then
+      phase_label = "Generating"
+    else
+      phase_label = "Thinking"
+    end
+    local elapsed_text = ""
+    if M.streaming_start_time then
+      local secs = math.floor((vim.loop.now() - M.streaming_start_time) / 1000)
+      if secs >= 1 then
+        elapsed_text = string.format(" (%ds)", secs)
+      end
+    end
+    add_line(string.format("  %s %s%s", frame, phase_label, elapsed_text), THINKING_HL)
   end
 
   ensure_separator()
@@ -1850,6 +2342,9 @@ function M.send_message(text, opts)
     M.is_streaming = true
     M.current_response = ""
     M.current_thinking = ""
+    M.streaming_start_time = vim.loop.now()
+    M.agent_phase = "thinking"
+    start_spinner_animation()
   end
 
   M.add_message("user", text, false, { images = display_images })
@@ -1877,6 +2372,8 @@ function M.send_message(text, opts)
           return
         end
         M.is_streaming = false
+        M.streaming_start_time = nil
+        M.agent_phase = "idle"
         M.add_message("system", "Error: " .. result.error, false)
       end
     end)
@@ -1898,10 +2395,51 @@ function M.load_history()
         local data = state_result.data
         if data.model then
           M.session_info.model = data.model.name or data.model.id or "Unknown"
+          M.session_info.model_data = data.model
+          M.session_info.context.window = data.model.contextWindow or 0
+        end
+        M.session_info.thinking_level = data.thinkingLevel
+        M.session_info.auto_compaction = data.autoCompactionEnabled ~= false
+
+        -- Sync streaming state: the agent may have started or stopped
+        -- while we were disconnected / the chat was closed.
+        local agent_running = data.isStreaming or false
+        if agent_running and not M.is_streaming then
+          M.is_streaming = true
+          M.streaming_start_time = M.streaming_start_time or vim.loop.now()
+          M.agent_phase = "thinking"
+          start_spinner_animation()
+        elseif not agent_running and M.is_streaming then
+          M.is_streaming = false
+          M.streaming_start_time = nil
+          M.agent_phase = "idle"
+          M.finalize_streaming_message()
+          M.current_response = ""
+          M.current_thinking = ""
+          stop_tool_spinner()
         end
       elseif state_result.error then
         vim.notify("Pi: Failed to get state - " .. state_result.error, vim.log.levels.WARN)
       end
+
+      -- Load session stats for cumulative usage
+      client:request("get_session_stats", { type = "get_session_stats" }, function(stats_result)
+        vim.schedule(function()
+          if stats_result and stats_result.success and stats_result.data then
+            local stats = stats_result.data
+            if stats.tokens then
+              M.session_info.cumulative.input = stats.tokens.input or 0
+              M.session_info.cumulative.output = stats.tokens.output or 0
+              M.session_info.cumulative.cache_read = stats.tokens.cacheRead or 0
+              M.session_info.cumulative.cache_write = stats.tokens.cacheWrite or 0
+            end
+            if stats.cost then
+              M.session_info.cumulative.cost = stats.cost
+            end
+          end
+          M.render()
+        end)
+      end)
 
       -- Always try to get messages even if state failed
       client:request("get_messages", { type = "get_messages" }, function(result)
@@ -1913,6 +2451,9 @@ function M.load_history()
 
           local messages = result.data and result.data.messages or {}
           M.messages = {}
+
+          -- Track the last assistant usage for context estimation
+          local last_assistant_usage = nil
 
           for _, msg in ipairs(messages) do
             local role = msg.role
@@ -1932,6 +2473,13 @@ function M.load_history()
               end
             end
 
+            -- Track last assistant usage for context calculation
+            if role == "assistant" and msg.usage then
+              if msg.stopReason ~= "aborted" and msg.stopReason ~= "error" then
+                last_assistant_usage = msg.usage
+              end
+            end
+
             if role == "toolResult" or role == "tool_result" then
               role = "tool_result"
             elseif role == "bashExecution" then
@@ -1947,6 +2495,11 @@ function M.load_history()
             end
           end
 
+          -- Set context usage from last assistant message
+          if last_assistant_usage then
+            update_context_from_usage(last_assistant_usage)
+          end
+
           M.render()
         end)
       end)
@@ -1958,6 +2511,7 @@ function M.close()
   autocomplete.close()
   autocomplete.close_hint()
   stop_spinner_animation()
+  stop_sync_timer()
   if pending_render_timer then
     vim.fn.timer_stop(pending_render_timer)
     pending_render_timer = nil
@@ -1968,6 +2522,9 @@ function M.close()
     M.event_unsub = nil
   end
 
+  if M.status_win and vim.api.nvim_win_is_valid(M.status_win) then
+    vim.api.nvim_win_close(M.status_win, true)
+  end
   if M.input_win and vim.api.nvim_win_is_valid(M.input_win) then
     vim.api.nvim_win_close(M.input_win, true)
   end
@@ -1975,6 +2532,9 @@ function M.close()
     vim.api.nvim_win_close(M.result_win, true)
   end
 
+  if M.status_buf and vim.api.nvim_buf_is_valid(M.status_buf) then
+    vim.api.nvim_buf_delete(M.status_buf, { force = true })
+  end
   if M.input_buf and vim.api.nvim_buf_is_valid(M.input_buf) then
     vim.api.nvim_buf_delete(M.input_buf, { force = true })
   end
@@ -1982,8 +2542,10 @@ function M.close()
     vim.api.nvim_buf_delete(M.result_buf, { force = true })
   end
 
+  M.status_win = nil
   M.input_win = nil
   M.result_win = nil
+  M.status_buf = nil
   M.input_buf = nil
   M.result_buf = nil
   M.origin_win = nil
