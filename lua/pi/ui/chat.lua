@@ -10,19 +10,35 @@ local M = {}
 local commands_loading = false
 
 local use_render_markdown = false
-local syntax_enabled = config.get("ui.syntax_highlighting") ~= false
-local inline_enabled = config.get("ui.inline_code_highlighting") ~= false
+local syntax_enabled = true
+local inline_enabled = true
 
 -- Register markdown treesitter parser for our custom filetype (like avante.nvim)
 vim.treesitter.language.register("markdown", "PiChat")
 
-local markdown
+local markdown = require("pi.ui.markdown")
 local syntax
 
-markdown = require("pi.ui.markdown")
-if syntax_enabled then
-  syntax = require("pi.ui.syntax")
+local function refresh_render_settings()
+  syntax_enabled = config.get("ui.syntax_highlighting") ~= false
+  inline_enabled = config.get("ui.inline_code_highlighting") ~= false
+
+  if syntax_enabled then
+    syntax = require("pi.ui.syntax")
+  else
+    syntax = nil
+  end
+
+  local want_render_markdown = config.get("ui.use_render_markdown") ~= false
+  if want_render_markdown then
+    local ok = pcall(require, "render-markdown")
+    use_render_markdown = ok
+  else
+    use_render_markdown = false
+  end
 end
+
+refresh_render_settings()
 
 local HIGHLIGHT_NS = vim.api.nvim_create_namespace("pi_chat_highlights")
 local STATUS_NS = vim.api.nvim_create_namespace("pi_chat_status")
@@ -102,6 +118,47 @@ local function setup_highlights()
     ["PiChatContextError"] = {
       fg_link = "ErrorMsg",
     },
+    -- Inline markdown formatting
+    ["PiChatBold"] = {
+      bold = true,
+    },
+    ["PiChatItalic"] = {
+      italic = true,
+    },
+    ["PiChatBoldItalic"] = {
+      bold = true,
+      italic = true,
+    },
+    ["PiChatStrike"] = {
+      strikethrough = true,
+      fg_link = "Comment",
+    },
+    ["PiChatLink"] = {
+      fg_link = "Underlined",
+      underline = true,
+    },
+    -- Headings
+    ["PiChatH1"] = {
+      fg_link = "Title",
+      bold = true,
+    },
+    ["PiChatH2"] = {
+      fg_link = "Title",
+      bold = true,
+    },
+    ["PiChatH3"] = {
+      fg_link = "Statement",
+    },
+    ["PiChatH4"] = {
+      fg_link = "Identifier",
+    },
+    ["PiChatH5"] = {
+      fg_link = "Comment",
+    },
+    ["PiChatH6"] = {
+      fg_link = "Comment",
+      italic = true,
+    },
   }
 
   for name, def in pairs(custom_highlights) do
@@ -159,6 +216,12 @@ M.streaming_start_time = nil
 M.agent_phase = "idle"  -- "idle", "thinking", "generating", "tool"
 M.last_event_time = nil  -- Last time we received any agent event
 M._sync_timer = nil       -- Periodic state sync timer
+
+-- Stale-stream / disconnect tracking
+M._stale_sync_failure_count = 0   -- Consecutive failed syncs while streaming
+M.agent_not_responding = false     -- True when sync failures cross warning threshold
+local STALE_SYNC_WARN_THRESHOLD  = 3  -- Show ⚠ warning after this many failures
+local STALE_SYNC_ABORT_THRESHOLD = 5  -- Auto-stop streaming after this many failures
 
 -- Session info
 M.session_info = {
@@ -534,6 +597,8 @@ local function handle_tool_result_metadata(tool_name, result, args)
   return filepath
 end
 
+local maybe_sync_stale_stream -- forward declaration (defined below)
+
 local function stop_spinner_animation()
   if spinner_timer then
     vim.fn.timer_stop(spinner_timer)
@@ -552,6 +617,9 @@ local function start_spinner_animation()
         return
       end
       M.spinner_index = (M.spinner_index % #M.spinner_frames) + 1
+      -- Detect stuck-streaming: if no event has arrived for a while, pro-actively
+      -- query the agent to check whether it already finished (missed agent_end).
+      maybe_sync_stale_stream()
       M.render()
     end)
   end, { ["repeat"] = -1 })
@@ -578,6 +646,10 @@ local function stop_tool_spinner()
 end
 
 local SYNC_INTERVAL = 30000  -- 30 seconds
+-- How long with no events before we treat streaming as potentially stale
+local STALE_STREAM_MS = 5000   -- 5 seconds of silence → suspect
+-- Minimum gap between stale-stream sync calls (to avoid spamming the RPC)
+local STALE_SYNC_MIN_INTERVAL_MS = 4000
 
 local function stop_sync_timer()
   if M._sync_timer then
@@ -601,29 +673,98 @@ local function start_sync_timer()
   end, { ["repeat"] = -1 })
 end
 
+--- Called from the spinner timer to detect a stuck-streaming state.
+--- If we've been "streaming" but received no events for STALE_STREAM_MS,
+--- we fire a sync to reconcile against the actual agent state.
+maybe_sync_stale_stream = function()
+  if not M.is_streaming then
+    return
+  end
+  local now = vim.loop.now()
+  -- Rate-limit: don't call sync more than once per STALE_SYNC_MIN_INTERVAL_MS
+  if M._stale_sync_last_check and (now - M._stale_sync_last_check) < STALE_SYNC_MIN_INTERVAL_MS then
+    return
+  end
+  -- If we received an event recently the stream is still healthy
+  if M.last_event_time and (now - M.last_event_time) < STALE_STREAM_MS then
+    return
+  end
+  M._stale_sync_last_check = now
+  M.sync_agent_state()
+end
+
 --- Synchronise the chat UI's streaming state with the actual agent state.
 --- This catches events that were missed (e.g. chat was closed/reopened,
 --- buffer overflow dropped a message, reconnection race, etc.).
 function M.sync_agent_state(callback)
   local client = state.get("rpc_client")
   if not client or not client.connected then
+    -- If we're stuck in streaming state but the client is gone, clear it
+    -- immediately rather than waiting for an event that may never arrive.
+    if M.is_streaming then
+      M.is_streaming = false
+      M.streaming_start_time = nil
+      M.agent_phase = "idle"
+      M.agent_not_responding = false
+      M._stale_sync_failure_count = 0
+      M.finalize_streaming_message()
+      M.current_response = ""
+      M.current_thinking = ""
+      M.tool_streams = {}
+      stop_tool_spinner()
+      M.add_message("system", "Agent disconnected", false)
+      M.render()
+    end
     if callback then callback() end
     return
   end
 
   -- If we've received an event very recently, the stream is healthy —
   -- skip the RPC round-trip to avoid unnecessary load.
-  if M.last_event_time and (vim.loop.now() - M.last_event_time) < 10000 then
+  -- 3 s is enough headroom: events arrive in bursts during generation,
+  -- so 3 s of silence is a reliable signal that activity has stopped.
+  if M.last_event_time and (vim.loop.now() - M.last_event_time) < 3000 then
     if callback then callback() end
     return
   end
 
+  -- Use a short timeout for this health-check request so that a completely
+  -- unresponsive agent is detected in seconds, not the default 30 s.
   client:request("get_state", { type = "get_state" }, function(result)
     vim.schedule(function()
       if not result or not result.success or not result.data then
+        -- Sync failed — track consecutive failures while streaming so we can
+        -- surface a warning and eventually abort the stuck spinner.
+        if M.is_streaming then
+          M._stale_sync_failure_count = M._stale_sync_failure_count + 1
+
+          if M._stale_sync_failure_count >= STALE_SYNC_ABORT_THRESHOLD then
+            -- Too many failures: forcibly clear the streaming state and warn.
+            M.is_streaming = false
+            M.streaming_start_time = nil
+            M.agent_phase = "idle"
+            M.agent_not_responding = false
+            M._stale_sync_failure_count = 0
+            M.finalize_streaming_message()
+            M.current_response = ""
+            M.current_thinking = ""
+            M.tool_streams = {}
+            stop_tool_spinner()
+            M.add_message("system", "Agent stopped responding — streaming aborted", false)
+          elseif M._stale_sync_failure_count >= STALE_SYNC_WARN_THRESHOLD then
+            -- Enough failures to show a warning, but keep trying.
+            M.agent_not_responding = true
+          end
+
+          M.render()
+        end
         if callback then callback() end
         return
       end
+
+      -- Successful sync — reset failure tracking.
+      M._stale_sync_failure_count = 0
+      M.agent_not_responding = false
 
       local data = result.data
       local agent_running = data.isStreaming or false
@@ -665,7 +806,7 @@ function M.sync_agent_state(callback)
       M.render()
       if callback then callback() end
     end)
-  end)
+  end, { timeout = 10000 })
 end
 
 local try_open_file
@@ -789,10 +930,13 @@ function M._open_ui()
     return
   end
 
+  refresh_render_settings()
+
   local origin_win = vim.api.nvim_get_current_win()
 
   M.result_buf = get_or_create_buf(M.RESULT_BUF_NAME, true)
-  vim.api.nvim_buf_set_option(M.result_buf, "filetype", "PiChat")
+  local result_ft = use_render_markdown and "markdown" or "PiChat"
+  vim.api.nvim_buf_set_option(M.result_buf, "filetype", result_ft)
   vim.api.nvim_buf_set_option(M.result_buf, "modifiable", false)
   vim.api.nvim_buf_set_option(M.result_buf, "wrap", true)
   vim.api.nvim_buf_set_option(M.result_buf, "linebreak", true)
@@ -912,10 +1056,33 @@ function M.setup_input_buffer()
   vim.api.nvim_buf_set_option(M.input_buf, "complete", "")
   vim.api.nvim_buf_set_option(M.input_buf, "omnifunc", "")
   vim.api.nvim_buf_set_option(M.input_buf, "completefunc", "")
-  -- Buffer-local variable respected by nvim-cmp, coq, and similar plugins
-  -- to skip attaching completion sources to this buffer.
-  vim.b[M.input_buf].cmp_enabled = false
-  vim.b[M.input_buf].copilot_enabled = false
+  -- Prevent the native completion pop-up from ever appearing in this buffer.
+  vim.api.nvim_buf_set_option(M.input_buf, "completeopt", "")
+  -- Buffer-local variables respected by common completion plugins to
+  -- skip attaching sources to this buffer.
+  vim.b[M.input_buf].cmp_enabled = false          -- nvim-cmp (if user config checks this)
+  vim.b[M.input_buf].copilot_enabled = false       -- copilot.lua / copilot-cmp
+  vim.b[M.input_buf].blink_cmp_enabled = false     -- blink.cmp
+
+  -- Explicitly configure nvim-cmp for this buffer (no sources, disabled).
+  -- Using BufEnter so the config is (re-)applied whenever the buffer is
+  -- entered, which is when cmp evaluates its per-buffer setup.
+  vim.api.nvim_create_autocmd("BufEnter", {
+    buffer = M.input_buf,
+    callback = function()
+      local cmp_ok, cmp = pcall(require, "cmp")
+      if cmp_ok then
+        cmp.setup.buffer({ enabled = false, sources = {} })
+      end
+    end,
+  })
+
+  -- Block the insert-mode CTRL-X sub-commands that trigger file/path/omni
+  -- completion so they can never surface a path popup over our / commands.
+  vim.keymap.set("i", "<C-x><C-f>", "<Nop>", { buffer = M.input_buf, silent = true, desc = "disabled: path completion" })
+  vim.keymap.set("i", "<C-x><C-o>", "<Nop>", { buffer = M.input_buf, silent = true, desc = "disabled: omni completion" })
+  vim.keymap.set("i", "<C-x><C-n>", "<Nop>", { buffer = M.input_buf, silent = true, desc = "disabled: keyword completion" })
+  vim.keymap.set("i", "<C-x><C-p>", "<Nop>", { buffer = M.input_buf, silent = true, desc = "disabled: keyword completion" })
 
   local autocomplete_enabled = config.get("ui.autocomplete_enabled") ~= false
   local function handle_enter()
@@ -1385,6 +1552,10 @@ function M.handle_event(event)
     M.current_thinking = ""
     M.streaming_start_time = M.streaming_start_time or vim.loop.now()
     M.agent_phase = "thinking"
+    -- Reset stale-sync trackers so the watchdog fires fresh for this run
+    M._stale_sync_last_check = nil
+    M._stale_sync_failure_count = 0
+    M.agent_not_responding = false
     M.add_message("assistant", "", true)
     stop_tool_spinner()
     start_spinner_animation()
@@ -1393,6 +1564,9 @@ function M.handle_event(event)
     M.is_streaming = false
     M.streaming_start_time = nil
     M.agent_phase = "idle"
+    M._stale_sync_last_check = nil
+    M._stale_sync_failure_count = 0
+    M.agent_not_responding = false
     M.finalize_streaming_message()
     M.current_response = ""
     M.current_thinking = ""
@@ -1418,7 +1592,12 @@ function M.handle_event(event)
     M.is_streaming = false
     M.streaming_start_time = nil
     M.agent_phase = "idle"
+    M._stale_sync_failure_count = 0
+    M.agent_not_responding = false
     M.finalize_streaming_message()
+    M.current_response = ""
+    M.current_thinking = ""
+    M.tool_streams = {}
     stop_tool_spinner()
     M.add_message("system", "Agent disconnected (exit code: " .. tostring(event.exit_code or "?") .. ")", false)
 
@@ -1890,10 +2069,6 @@ render_input_status = function()
   -- Status indicators line (streaming, images)
   local indicator_parts = {}
   if M.is_streaming then
-    local frame = M.spinner_frames[M.spinner_index] or M.spinner_frames[1]
-    local phase_text = M.agent_phase == "generating" and "generating"
-      or M.agent_phase == "tool" and "running tool"
-      or "thinking"
     local elapsed_text = ""
     if M.streaming_start_time then
       local secs = math.floor((vim.loop.now() - M.streaming_start_time) / 1000)
@@ -1901,13 +2076,28 @@ render_input_status = function()
         elapsed_text = string.format(" %ds", secs)
       end
     end
-    table.insert(indicator_parts, string.format("%s %s%s", frame, phase_text, elapsed_text))
+    if M.agent_not_responding then
+      -- Agent has stopped sending events and sync calls are failing.
+      -- Show a clear warning so the user knows something is wrong.
+      table.insert(indicator_parts, string.format("⚠ not responding%s", elapsed_text))
+    else
+      local frame = M.spinner_frames[M.spinner_index] or M.spinner_frames[1]
+      local phase_text = M.agent_phase == "generating" and "generating"
+        or M.agent_phase == "tool" and "running tool"
+        or "thinking"
+      table.insert(indicator_parts, string.format("%s %s%s", frame, phase_text, elapsed_text))
+    end
   end
   if #M.pending_images > 0 then
     table.insert(indicator_parts, string.format("%d image(s) attached", #M.pending_images))
   end
   if #indicator_parts > 0 then
-    add_chunked_line({ { table.concat(indicator_parts, "  •  "), THINKING_HL } })
+    -- Use an error highlight when the agent is not responding so the user
+    -- gets a clear visual signal that something is wrong.
+    local indicator_hl = (M.is_streaming and M.agent_not_responding)
+      and "PiChatContextError"
+      or THINKING_HL
+    add_chunked_line({ { table.concat(indicator_parts, "  •  "), indicator_hl } })
   end
 
   local footer = "Enter=send  Shift+Enter=new line  q=close  Ctrl+e=model"
@@ -1929,7 +2119,7 @@ render_input_status = function()
 
   -- Resize status window to fit content
   if M.status_win and vim.api.nvim_win_is_valid(M.status_win) then
-    local target_height = math.max(1, #lines)
+    local target_height = math.max(3, #lines)
     vim.api.nvim_win_set_height(M.status_win, target_height)
   end
 end
@@ -1942,6 +2132,7 @@ local function perform_render()
   local lines = {}
   local line_highlights = {}
   local range_highlights = {}
+  local extmarks = {}  -- { line, col, opts } applied after buf_set_lines
 
   local width = 40
   if M.result_win and vim.api.nvim_win_is_valid(M.result_win) then
@@ -2122,8 +2313,34 @@ local function perform_render()
   end
 
   local function render_assistant_custom(msg)
-    local thinking_left = thinking_line_count(msg.thinking or "")
-    local blocks = markdown.parse(msg.content or "", msg.streaming)
+    local thinking = msg.thinking or ""
+    local thinking_left = thinking_line_count(thinking)
+
+    -- Strip the embedded thinking prefix from content so it isn't shown twice
+    local body = msg.content or ""
+    if thinking ~= "" then
+      local prefix = thinking .. "\n\n"
+      if body:sub(1, #prefix) == prefix then
+        body = body:sub(#prefix + 1)
+      end
+    end
+
+    -- Render thinking block first (italic/dimmed)
+    if thinking ~= "" then
+      for _, tline in ipairs(split_text(thinking)) do
+        add_line("  " .. tline, THINKING_HL)
+      end
+      add_line("", nil)
+    end
+    _ = thinking_left -- suppress unused-variable lint
+
+    local blocks = markdown.parse(body, msg.streaming)
+
+    -- Heading highlight groups by level
+    local heading_hls = {
+      "PiChatH1", "PiChatH2", "PiChatH3",
+      "PiChatH4", "PiChatH5", "PiChatH6",
+    }
 
     for _, block in ipairs(blocks) do
       if block.type == "code" then
@@ -2134,8 +2351,8 @@ local function perform_render()
           add_line("  " .. code_line, "PiChatCodeBlock")
         end
         if syntax and block.lang and block.lang ~= "" then
-          local highlights = syntax.get_highlights(block.content or "", block.lang)
-          for _, hl in ipairs(highlights) do
+          local syn_highlights = syntax.get_highlights(block.content or "", block.lang)
+          for _, hl in ipairs(syn_highlights) do
             local target_line = code_start + hl.line
             add_range_highlight(target_line, 2 + hl.col_start, 2 + hl.col_end, hl.hl_group)
           end
@@ -2145,34 +2362,106 @@ local function perform_render()
         else
           add_line("  ```", "PiChatCodeFence")
         end
+
+      elseif block.type == "heading" then
+        local level = math.max(1, math.min(6, block.level or 1))
+        local hl_group = heading_hls[level] or "PiChatH3"
+        add_line("  " .. (block.content or ""), hl_group)
+
       elseif block.type == "text_with_inline" then
-        local line_hl
-        if thinking_left > 0 then
-          line_hl = THINKING_HL
-          thinking_left = thinking_left - 1
-        end
         local text = "  "
-        local cursor = #text
-        local inline_ranges = {}
+        local cursor = #text   -- byte offset within the line string
+        local inline_ranges_for_line = {}
+        local extmarks_for_line = {}
+
         for _, segment in ipairs(block.segments or {}) do
-          local segment_text = segment.content or ""
-          if inline_enabled and segment.type == "code" then
-            table.insert(inline_ranges, { start = cursor, end_col = cursor + #segment_text })
+          local content = segment.content or ""
+          local stype   = segment.type
+
+          if stype == "code" then
+            -- No markers in the buffer; just highlight the content
+            if inline_enabled then
+              table.insert(inline_ranges_for_line, {
+                start = cursor, end_col = cursor + #content, group = "PiChatInlineCode",
+              })
+            end
+            text   = text .. content
+            cursor = cursor + #content
+
+          elseif stype == "bold" or stype == "bold_italic" then
+            local open_m  = segment.open_marker  or (stype == "bold_italic" and "***" or "**")
+            local close_m = segment.close_marker or open_m
+            local hl      = stype == "bold_italic" and "PiChatBoldItalic" or "PiChatBold"
+            -- Put markers in buffer so conceal can hide them
+            table.insert(extmarks_for_line, { col = cursor, end_col = cursor + #open_m })
+            text   = text .. open_m
+            cursor = cursor + #open_m
+            table.insert(inline_ranges_for_line, { start = cursor, end_col = cursor + #content, group = hl })
+            text   = text .. content
+            cursor = cursor + #content
+            table.insert(extmarks_for_line, { col = cursor, end_col = cursor + #close_m })
+            text   = text .. close_m
+            cursor = cursor + #close_m
+
+          elseif stype == "italic" then
+            local open_m  = segment.open_marker  or "*"
+            local close_m = segment.close_marker or open_m
+            table.insert(extmarks_for_line, { col = cursor, end_col = cursor + #open_m })
+            text   = text .. open_m
+            cursor = cursor + #open_m
+            table.insert(inline_ranges_for_line, {
+              start = cursor, end_col = cursor + #content, group = "PiChatItalic",
+            })
+            text   = text .. content
+            cursor = cursor + #content
+            table.insert(extmarks_for_line, { col = cursor, end_col = cursor + #close_m })
+            text   = text .. close_m
+            cursor = cursor + #close_m
+
+          elseif stype == "strike" then
+            local open_m  = segment.open_marker  or "~~"
+            local close_m = segment.close_marker or open_m
+            table.insert(extmarks_for_line, { col = cursor, end_col = cursor + #open_m })
+            text   = text .. open_m
+            cursor = cursor + #open_m
+            table.insert(inline_ranges_for_line, {
+              start = cursor, end_col = cursor + #content, group = "PiChatStrike",
+            })
+            text   = text .. content
+            cursor = cursor + #content
+            table.insert(extmarks_for_line, { col = cursor, end_col = cursor + #close_m })
+            text   = text .. close_m
+            cursor = cursor + #close_m
+
+          elseif stype == "link" then
+            -- Show link text only, highlighted; URL is discarded from display
+            table.insert(inline_ranges_for_line, {
+              start = cursor, end_col = cursor + #content, group = "PiChatLink",
+            })
+            text   = text .. content
+            cursor = cursor + #content
+
+          else -- plain text
+            text   = text .. content
+            cursor = cursor + #content
           end
-          text = text .. segment_text
-          cursor = cursor + #segment_text
         end
-        local line_idx = add_line(text, line_hl)
-        for _, rng in ipairs(inline_ranges) do
-          add_range_highlight(line_idx, rng.start, rng.end_col, "PiChatInlineCode")
+
+        local line_idx = add_line(text, nil)
+        for _, rng in ipairs(inline_ranges_for_line) do
+          add_range_highlight(line_idx, rng.start, rng.end_col, rng.group)
         end
-      else
-        local line_hl
-        if thinking_left > 0 then
-          line_hl = THINKING_HL
-          thinking_left = thinking_left - 1
+        -- Register conceal extmarks for syntax markers (conceallevel=2 on the window)
+        for _, em in ipairs(extmarks_for_line) do
+          table.insert(extmarks, {
+            line = line_idx,
+            col  = em.col,
+            opts = { end_col = em.end_col, conceal = "" },
+          })
         end
-        add_line("  " .. (block.content or ""), line_hl)
+
+      else -- plain text block
+        add_line("  " .. (block.content or ""), nil)
       end
     end
   end
@@ -2282,6 +2571,11 @@ local function perform_render()
 
     for _, entry in ipairs(range_highlights) do
       apply_range(entry)
+    end
+
+    -- Apply conceal extmarks for inline markdown markers (**bold**, *italic*, etc.)
+    for _, em in ipairs(extmarks) do
+      pcall(vim.api.nvim_buf_set_extmark, M.result_buf, HIGHLIGHT_NS, em.line, em.col, em.opts)
     end
   end
 

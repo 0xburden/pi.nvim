@@ -77,30 +77,158 @@ local function parse_with_treesitter(text)
   return filtered
 end
 
-function M.parse_inline_code(line)
+--- Parse a single line into inline segments.
+--- Recognises: bold (**/..), italic (*/_..), bold-italic (***), strikethrough (~~),
+--- inline code (`), and links ([text](url)).
+--- Each segment has: type, content, and optionally open_marker / close_marker.
+function M.parse_inline_segments(line)
   local segments = {}
   local pos = 1
+  local len = #line
 
-  while pos <= #line do
-    local backtick = line:find("`", pos, true)
-    if not backtick then
-      if pos <= #line then
-        table.insert(segments, { type = "text", content = line:sub(pos) })
+  while pos <= len do
+    local found_special = false
+    local ch  = line:sub(pos, pos)
+    local ch2 = line:sub(pos, pos + 1)
+    local ch3 = line:sub(pos, pos + 2)
+
+    -- Bold-italic:  ***text***
+    if not found_special and ch3 == "***" then
+      local close = line:find("%*%*%*", pos + 3, true)
+      if close then
+        table.insert(segments, {
+          type = "bold_italic",
+          content = line:sub(pos + 3, close - 1),
+          open_marker = "***",
+          close_marker = "***",
+        })
+        pos = close + 3
+        found_special = true
       end
-      break
     end
 
-    if backtick > pos then
-      table.insert(segments, { type = "text", content = line:sub(pos, backtick - 1) })
+    -- Bold:  **text**  or  __text__
+    if not found_special and (ch2 == "**" and line:sub(pos + 2, pos + 2) ~= "*") then
+      local close = line:find("%*%*", pos + 2, true)
+      if close and line:sub(close + 2, close + 2) ~= "*" then
+        table.insert(segments, {
+          type = "bold",
+          content = line:sub(pos + 2, close - 1),
+          open_marker = "**",
+          close_marker = "**",
+        })
+        pos = close + 2
+        found_special = true
+      end
+    end
+    if not found_special and ch2 == "__" and line:sub(pos + 2, pos + 2) ~= "_" then
+      local close = line:find("__", pos + 2, true)
+      if close and line:sub(close + 2, close + 2) ~= "_" then
+        table.insert(segments, {
+          type = "bold",
+          content = line:sub(pos + 2, close - 1),
+          open_marker = "__",
+          close_marker = "__",
+        })
+        pos = close + 2
+        found_special = true
+      end
     end
 
-    local close = line:find("`", backtick + 1, true)
-    if close then
-      table.insert(segments, { type = "code", content = line:sub(backtick + 1, close - 1) })
-      pos = close + 1
-    else
-      table.insert(segments, { type = "text", content = line:sub(backtick) })
-      break
+    -- Italic:  *text*  or  _text_
+    if not found_special and ch == "*" and line:sub(pos + 1, pos + 1) ~= "*" then
+      local close = line:find("%*", pos + 1, true)
+      if close and line:sub(close + 1, close + 1) ~= "*" then
+        table.insert(segments, {
+          type = "italic",
+          content = line:sub(pos + 1, close - 1),
+          open_marker = "*",
+          close_marker = "*",
+        })
+        pos = close + 1
+        found_special = true
+      end
+    end
+    if not found_special and ch == "_" and line:sub(pos + 1, pos + 1) ~= "_" then
+      local close = line:find("_", pos + 1, true)
+      if close and line:sub(close + 1, close + 1) ~= "_" then
+        table.insert(segments, {
+          type = "italic",
+          content = line:sub(pos + 1, close - 1),
+          open_marker = "_",
+          close_marker = "_",
+        })
+        pos = close + 1
+        found_special = true
+      end
+    end
+
+    -- Strikethrough:  ~~text~~
+    if not found_special and ch2 == "~~" then
+      local close = line:find("~~", pos + 2, true)
+      if close then
+        table.insert(segments, {
+          type = "strike",
+          content = line:sub(pos + 2, close - 1),
+          open_marker = "~~",
+          close_marker = "~~",
+        })
+        pos = close + 2
+        found_special = true
+      end
+    end
+
+    -- Inline code:  `text`
+    if not found_special and ch == "`" then
+      local close = line:find("`", pos + 1, true)
+      if close then
+        table.insert(segments, {
+          type = "code",
+          content = line:sub(pos + 1, close - 1),
+        })
+        pos = close + 1
+        found_special = true
+      end
+    end
+
+    -- Link:  [text](url)
+    if not found_special and ch == "[" then
+      local bracket_close = line:find("]%(", pos + 1, true)
+      if bracket_close then
+        local url_end = line:find(")", bracket_close + 2, true)
+        if url_end then
+          table.insert(segments, {
+            type = "link",
+            content = line:sub(pos + 1, bracket_close - 1),
+            url = line:sub(bracket_close + 2, url_end - 1),
+          })
+          pos = url_end + 1
+          found_special = true
+        end
+      end
+    end
+
+    if not found_special then
+      -- Advance to next potential special character
+      local next_pos = line:find("[%*~`%[_]", pos + 1, false)
+      local last = segments[#segments]
+      if next_pos then
+        local chunk = line:sub(pos, next_pos - 1)
+        if last and last.type == "text" then
+          last.content = last.content .. chunk
+        else
+          table.insert(segments, { type = "text", content = chunk })
+        end
+        pos = next_pos
+      else
+        local chunk = line:sub(pos)
+        if last and last.type == "text" then
+          last.content = last.content .. chunk
+        else
+          table.insert(segments, { type = "text", content = chunk })
+        end
+        break
+      end
     end
   end
 
@@ -111,8 +239,18 @@ function M.parse_inline_code(line)
   return segments
 end
 
+-- Backward-compat alias
+M.parse_inline_code = M.parse_inline_segments
+
 local function should_highlight_inline(line)
-  return line and line:match("`[^`]+`") ~= nil
+  if not line then return false end
+  return line:match("`[^`]+`") ~= nil
+    or line:match("%*%*.+%*%*") ~= nil
+    or line:match("%*[^%*].-%*") ~= nil
+    or line:match("__[^_].+__") ~= nil
+    or line:match("_[^_].+_") ~= nil
+    or line:match("~~.+~~") ~= nil
+    or line:match("%[.+%]%(.+%)") ~= nil
 end
 
 local function build_result_blocks(text, ts_blocks)
@@ -122,11 +260,24 @@ local function build_result_blocks(text, ts_blocks)
   local block_idx = 1
 
   local function push_line(line)
+    -- Check for heading
+    local hashes, hcontent = line:match("^(#+)%s+(.-)%s*$")
+    if hashes then
+      table.insert(result, {
+        type = "heading",
+        level = math.min(#hashes, 6),
+        content = hcontent,
+        start_line = line_idx,
+        end_line = line_idx,
+      })
+      return
+    end
+
     if should_highlight_inline(line) then
       table.insert(result, {
         type = "text_with_inline",
         raw = line,
-        segments = M.parse_inline_code(line),
+        segments = M.parse_inline_segments(line),
         start_line = line_idx,
         end_line = line_idx,
       })
@@ -189,7 +340,9 @@ function M.parse_regex(text, allow_incomplete)
 
   while i <= #lines do
     local line = lines[i] or ""
-    local fence_lang = line:match("^%s*```([%w_+%-]*)")
+
+    -- Fenced code block
+    local fence_lang = line:match("^%s*```%s*([^%s`]*)")
     if fence_lang then
       local lang = fence_lang ~= "" and fence_lang or nil
       local code_lines = {}
@@ -219,11 +372,20 @@ function M.parse_regex(text, allow_incomplete)
         else
           for idx = start_line, #lines do
             local literal = lines[idx] or ""
-            if should_highlight_inline(literal) then
+            local hashes, hcontent = literal:match("^(#+)%s+(.-)%s*$")
+            if hashes then
+              table.insert(result, {
+                type = "heading",
+                level = math.min(#hashes, 6),
+                content = hcontent,
+                start_line = idx,
+                end_line = idx,
+              })
+            elseif should_highlight_inline(literal) then
               table.insert(result, {
                 type = "text_with_inline",
                 raw = literal,
-                segments = M.parse_inline_code(literal),
+                segments = M.parse_inline_segments(literal),
                 start_line = idx,
                 end_line = idx,
               })
@@ -251,12 +413,23 @@ function M.parse_regex(text, allow_incomplete)
           i = i + 1
         end
       end
+
     else
-      if should_highlight_inline(line) then
+      -- Heading
+      local hashes, hcontent = line:match("^(#+)%s+(.-)%s*$")
+      if hashes then
+        table.insert(result, {
+          type = "heading",
+          level = math.min(#hashes, 6),
+          content = hcontent,
+          start_line = i,
+          end_line = i,
+        })
+      elseif should_highlight_inline(line) then
         table.insert(result, {
           type = "text_with_inline",
           raw = line,
-          segments = M.parse_inline_code(line),
+          segments = M.parse_inline_segments(line),
           start_line = i,
           end_line = i,
         })

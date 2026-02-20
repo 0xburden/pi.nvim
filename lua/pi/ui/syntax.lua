@@ -3,9 +3,17 @@ local M = {}
 local lang_available = {}
 
 local function normalize_lang(lang)
-  if not lang or lang == "" then
+  if type(lang) ~= "string" then
     return nil
   end
+
+  lang = lang:match("^%s*(.-)%s*$")
+  if lang == "" then
+    return nil
+  end
+
+  lang = lang:match("^(%S+)") or lang
+  lang = lang:lower()
 
   local aliases = {
     sh = "bash",
